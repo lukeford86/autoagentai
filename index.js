@@ -76,8 +76,7 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   const elevenURL = `wss://api.elevenlabs.io/v1/convai/ws?agent_id=${agentId}`;
 
   console.log('🔌 Twilio WebSocket connected');
-  console.log(`🌐 Connecting to ElevenLabs using Agent ID: ${agentId}`);
-  console.log(`🔗 ElevenLabs WS URL: ${elevenURL}`);
+  console.log(`🌐 Using ElevenLabs Agent ID: ${agentId}`);
 
   const elevenWs = new WebSocket(elevenURL, {
     headers: { 'xi-api-key': ELEVENLABS_API_KEY }
@@ -89,14 +88,14 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
 
   connection.socket.on('message', (audioChunk) => {
     if (elevenWs.readyState === WebSocket.OPEN) {
-      console.log('📤 Sending audio to ElevenLabs');
+      console.log(`📤 -> ElevenLabs | Chunk size: ${audioChunk.length} bytes`);
       elevenWs.send(audioChunk);
     }
   });
 
   elevenWs.on('message', (aiAudio) => {
     if (connection.socket.readyState === WebSocket.OPEN) {
-      console.log('📥 Sending audio back to Twilio');
+      console.log(`📥 <- ElevenLabs | Response size: ${aiAudio.length} bytes`);
       connection.socket.send(aiAudio);
     }
   });
