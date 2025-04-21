@@ -5,9 +5,11 @@
   "scripts": {
     "start": "node index.js"
   },
-  "dependencies": {
-    "fastify": "^4.0.0",
-    "@fastify/formbody": "^7.0.0",
-    "@fastify/websocket": "^7.0.0"
+"dependencies": {
+  "fastify": "^4.0.0",
+  "@fastify/formbody": "^7.0.0",
+  "@fastify/websocket": "^7.0.0",
+  "twilio": "^4.0.0",
+  "dotenv": "^16.3.1"
   }
 }
