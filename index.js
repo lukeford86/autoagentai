@@ -19,12 +19,13 @@ const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Escape XML characters
 const escapeXml = (unsafe) =>
-  unsafe.replace(/[<>&'"]/g, (c) => ({
+  unsafe.replace(/[<>&'"/]/g, (c) => ({
     '<': '&lt;',
     '>': '&gt;',
     '&': '&amp;',
     "'": '&apos;',
     '"': '&quot;',
+    '/': '&#x2F;'
   })[c]);
 
 // Outbound call trigger
@@ -104,8 +105,11 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   });
 
   elevenWs.on('message', (audio) => {
-    // Placeholder: handle ElevenLabs audio back to Twilio
-    console.log('🗣️ Received audio from ElevenLabs');
+    // Send audio back to Twilio
+    if (conn.socket.readyState === WebSocket.OPEN) {
+      conn.socket.send(audio);
+      console.log('🗣️ Forwarded audio to Twilio');
+    }
   });
 
   conn.socket.on('close', () => {
