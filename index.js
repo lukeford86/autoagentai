@@ -2,7 +2,7 @@
 require('dotenv').config();
 const fastify = require('fastify')();
 const twilio = require('twilio');
-const WebSocket = require('ws');
+const { WebSocket } = require('ws');
 
 // Register plugins
 fastify.register(require('@fastify/formbody'));
@@ -20,26 +20,22 @@ const {
 // Twilio client
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Escape XML characters to prevent invalid TwiML
-function escapeXml(unsafe) {
-  return unsafe.replace(/[<>&"'\/]/g, (c) => {
-    switch (c) {
-      case '<': return '&lt;';
-      case '>': return '&gt;';
-      case '&': return '&amp;';
-      case '"': return '&quot;';
-      case "'": return '&apos;';
-      case '/': return '&#x2F;';
-      default: return c;
-    }
-  });
+// Generate TwiML for Twilio callbacks
+function generateTwiml() {
+  console.log('🧾 Generating TwiML with default agent settings');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Start>
+    <Stream url="wss://autoagentai.onrender.com/twilio-stream" />
+  </Start>
+  <Pause length="600" />
+</Response>`;
 }
 
 // Endpoint to trigger outbound call
 fastify.post('/outbound-call', async (req, reply) => {
   const { phoneNumber } = req.body;
   console.log('📞 Triggering call to:', phoneNumber);
-
   try {
     const call = await client.calls.create({
       to: phoneNumber,
@@ -53,20 +49,6 @@ fastify.post('/outbound-call', async (req, reply) => {
     reply.status(500).send({ error: err.message });
   }
 });
-
-// Generate TwiML for Twilio callbacks
-function generateTwiml() {
-  console.log('🧾 Generating TwiML with default agent settings');
-  // include a long pause so connection stays open and let the media stream flow
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Start>
-    <Stream url="wss://autoagentai.onrender.com/twilio-stream" />
-  </Start>
-  <Pause length="600"/>
-</Response>`;
-}
-}
 
 // Handle TwiML callback (GET & POST)
 fastify.route({
@@ -82,8 +64,7 @@ fastify.route({
 fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   console.log('🔌 Twilio stream opened');
 
-  const agentId = ELEVENLABS_AGENT_ID;
-  const wsUrl = `wss://api.elevenlabs.io/v1/conversation?agent_id=${encodeURIComponent(agentId)}`;
+  const wsUrl = `wss://api.elevenlabs.io/v1/conversation?agent_id=${encodeURIComponent(ELEVENLABS_AGENT_ID)}`;
   console.log('🔗 Connecting to ElevenLabs WS:', wsUrl);
 
   const elevenWs = new WebSocket(wsUrl, {
@@ -110,7 +91,6 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
     }
   });
 
-  // Clean up on close
   conn.socket.on('close', () => {
     console.log('❌ Twilio stream closed');
     elevenWs.close();
