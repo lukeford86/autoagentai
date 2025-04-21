@@ -59,8 +59,6 @@ function generateTwiml(prompt, firstMessage) {
   <Say>${safeMessage}</Say>
   <Pause length="60" />
 </Response>`;
-}</Say>
-</Response>`;
 }
 
 // Handle GET requests (for browser)
