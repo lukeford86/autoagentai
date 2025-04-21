@@ -18,14 +18,14 @@ const {
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Escape XML characters
-const escapeXml = (unsafe) =>
+tonscapeXml = (unsafe) =>
   unsafe.replace(/[<>&'"/]/g, (c) => ({
-    '<': '&lt;',
-    '>': '&gt;',
-    '&': '&amp;',
-    "'": '&apos;',
-    '"': '&quot;',
-    '/': '&#x2F;'
+    '<': '&lt;'),
+    '>': '&gt;'),
+    '&': '&amp;'),
+    "'": '&apos;'),
+    '"': '&quot;'),
+    '/': '&#x2F;')
   })[c]);
 
 // Outbound call trigger
@@ -41,7 +41,6 @@ fastify.post('/outbound-call', async (req, reply) => {
       from: TWILIO_PHONE_NUMBER,
       url: `https://autoagentai.onrender.com/twiml?prompt=${encodeURIComponent(prompt)}&firstMessage=${encodeURIComponent(firstMessage)}`
     });
-
     console.log('✅ Twilio call initiated. SID:', call.sid);
     reply.send({ status: 'ok', sid: call.sid });
   } catch (err) {
@@ -53,7 +52,8 @@ fastify.post('/outbound-call', async (req, reply) => {
 // Shared TwiML generator
 function generateTwiml(prompt, firstMessage) {
   const safeMessage = escapeXml(firstMessage || 'Hi! This is Auto Agent AI calling.');
-  console.log('🧾 Generating TwiML for message:', safeMessage);
+  console.log('🧾 Generating TwiML with prompt:', prompt);
+  console.log('🧾 Generating TwiML with message:', safeMessage);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
@@ -69,7 +69,6 @@ fastify.get('/twiml', async (req, reply) => {
   const prompt = req.query.prompt || '';
   const firstMessage = req.query.firstMessage || '';
   console.log('🚦 [GET] /twiml called with:', req.query);
-
   reply.type('text/xml').send(generateTwiml(prompt, firstMessage));
 });
 
@@ -78,7 +77,6 @@ fastify.post('/twiml', async (req, reply) => {
   const prompt = req.body.prompt || '';
   const firstMessage = req.body.firstMessage || '';
   console.log('🚦 [POST] /twiml called with:', req.body);
-
   reply.type('text/xml').send(generateTwiml(prompt, firstMessage));
 });
 
@@ -88,6 +86,7 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   console.log('🔍 Request query:', req.query);
 
   const firstMessage = req.query.firstMessage || 'Hi! This is Auto Agent AI calling.';
+  const prompt = req.query.prompt || '';
   const agentId = ELEVENLABS_AGENT_ID;
 
   const elevenWs = new WebSocket('wss://api.elevenlabs.io/v1/conversation', {
@@ -101,9 +100,10 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
     console.log('🧠 Connected to ElevenLabs Conversational AI');
     elevenWs.send(JSON.stringify({
       agent_id: agentId,
-      first_message: firstMessage
+      first_message: firstMessage,
+      prompt: prompt
     }));
-    console.log('📝 Sent agent_id and first_message to ElevenLabs');
+    console.log('📝 Sent initial config to ElevenLabs');
   });
 
   conn.socket.on('message', (data) => {
