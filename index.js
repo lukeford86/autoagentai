@@ -57,12 +57,15 @@ fastify.post('/outbound-call', async (req, reply) => {
 // Generate TwiML for Twilio callbacks
 function generateTwiml() {
   console.log('🧾 Generating TwiML with default agent settings');
+  // include a long pause so connection stays open and let the media stream flow
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
+    <Stream url="wss://autoagentai.onrender.com/twilio-stream" />
   </Start>
+  <Pause length="600"/>
 </Response>`;
+}
 }
 
 // Handle TwiML callback (GET & POST)
