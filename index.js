@@ -26,21 +26,11 @@ function generateTwiml() {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="wss://${process.env.SERVER_DOMAIN || 'autoagentai.onrender.com'}/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000"/>
+    <Stream url="wss://${process.env.SERVER_DOMAIN || 'autoagentai.onrender.com'}/twilio-stream" track="both" />
   </Start>
+  <Pause length="600" />
 </Response>`;
 }
-
-// Outbound call trigger
-fastify.post('/outbound-call', async (req, reply) => {
-  const { phoneNumber } = req.body;
-  console.log('📞 Triggering call to:', phoneNumber);
-  try {
-    const call = await client.calls.create({
-      to: phoneNumber,
-      from: TWILIO_PHONE_NUMBER,
-      url: `https://${process.env.SERVER_DOMAIN || 'autoagentai.onrender.com'}/twiml`
-    });
     console.log('✅ Twilio call initiated. SID:', call.sid);
     reply.send({ status: 'ok', sid: call.sid });
   } catch (err) {
