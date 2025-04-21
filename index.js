@@ -3,7 +3,6 @@ require('dotenv').config();
 const fastify = require('fastify')({ logger: true });
 const WebSocket = require('ws');
 const twilio = require('twilio');
-const https = require('https');
 
 // Load configuration from environment
 const {
@@ -30,38 +29,6 @@ if (!ELEVENLABS_API_KEY || !ELEVENLABS_AGENT_ID) {
 
 // Initialize Twilio client
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
-// Verify ElevenLabs credentials
-async function verifyElevenLabsCredentials() {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.elevenlabs.io',
-      port: 443,
-      path: '/v1/user',
-      method: 'GET',
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      if (res.statusCode === 200) {
-        console.log('✅ ElevenLabs API key verified');
-        resolve(true);
-      } else {
-        console.error(`❌ ElevenLabs API key verification failed: ${res.statusCode}`);
-        resolve(false);
-      }
-    });
-
-    req.on('error', (e) => {
-      console.error(`❌ ElevenLabs API key verification error: ${e.message}`);
-      resolve(false);
-    });
-
-    req.end();
-  });
-}
 
 // Register Fastify plugins
 fastify.register(require('@fastify/formbody'));
@@ -167,8 +134,8 @@ fastify.post('/call-status', async (req, reply) => {
 fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   const agentId = ELEVENLABS_AGENT_ID;
   
-  // Use the correct format for ElevenLabs Convai API
-  const elevenURL = `wss://api.elevenlabs.io/v1/text-to-speech/${agentId}/stream-input?optimize_streaming_latency=0`;
+  // THIS IS THE CORRECT ENDPOINT FOR CONVAI AGENTS
+  const elevenURL = `wss://api.elevenlabs.io/v1/convai/ws?agent_id=${agentId}`;
   
   console.log('🔌 Twilio WebSocket connected');
   console.log(`🌐 Using ElevenLabs Agent ID: ${agentId}`);
@@ -186,34 +153,15 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     
     console.log(`📡 Connecting to ElevenLabs...`);
     
-    // Additional headers for ElevenLabs authentication
-    const headers = {
-      'xi-api-key': ELEVENLABS_API_KEY,
-      'User-Agent': 'ElevenLabs-TwilioConnector/1.0'
-    };
-    
-    // Create the WebSocket connection
-    elevenWs = new WebSocket(elevenURL, { headers });
+    // Create the WebSocket connection with the API key in headers
+    elevenWs = new WebSocket(elevenURL, {
+      headers: { 
+        'xi-api-key': ELEVENLABS_API_KEY 
+      }
+    });
 
     elevenWs.on('open', () => {
       console.log('✅ ElevenLabs WebSocket open');
-      
-      // If required, send an initial config message
-      const configMessage = JSON.stringify({
-        text: "",
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75
-        },
-        xi_api_key: ELEVENLABS_API_KEY
-      });
-      
-      // Only send if WebSocket is open
-      if (elevenWs.readyState === WebSocket.OPEN) {
-        console.log('📤 Sending initial config to ElevenLabs');
-        elevenWs.send(configMessage);
-      }
-      
       reconnectAttempts = 0; // Reset reconnect counter on successful connection
     });
     
@@ -230,27 +178,14 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     
     elevenWs.on('error', err => {
       console.error(`❌ ElevenLabs WebSocket error: ${err.message}`);
-      console.error('Error details:', err);
     });
     
     // Handle messages from ElevenLabs
     elevenWs.on('message', (data) => {
       try {
         if (connection.socket.readyState === WebSocket.OPEN) {
-          console.log(`📥 <- ElevenLabs | Received data of type: ${typeof data}`);
-          
-          // Check if data is binary audio or text JSON
-          if (data instanceof Buffer) {
-            console.log(`📥 <- ElevenLabs | Audio response size: ${data.length} bytes`);
-            connection.socket.send(data);
-          } else {
-            // If text, try to parse as JSON
-            const textData = data.toString();
-            console.log(`📥 <- ElevenLabs | Text response: ${textData.substring(0, 100)}...`);
-            
-            // Still forward to Twilio in case it's needed
-            connection.socket.send(data);
-          }
+          console.log(`📥 <- ElevenLabs | Response size: ${data.length} bytes`);
+          connection.socket.send(data);
         }
       } catch (error) {
         console.error(`❌ Error processing ElevenLabs message: ${error.message}`);
@@ -265,7 +200,7 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   connection.socket.on('message', (audioChunk) => {
     try {
       if (elevenWs && elevenWs.readyState === WebSocket.OPEN) {
-        console.log(`📤 -> ElevenLabs | Sending audio chunk: ${audioChunk.length} bytes`);
+        console.log(`📤 -> ElevenLabs | Audio chunk size: ${audioChunk.length} bytes`);
         elevenWs.send(audioChunk);
       } else {
         console.warn('⚠️ ElevenLabs WebSocket not ready, dropping audio chunk');
@@ -288,34 +223,18 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   connection.socket.on('error', (err) => {
     console.error(`❌ Twilio WebSocket error: ${err.message}`);
   });
-  
-  // Handle pings to keep connection alive
-  connection.socket.on('ping', () => {
-    console.log('📡 Received ping from Twilio');
-    connection.socket.pong();
-  });
 });
 
 // Start server
-const startServer = async () => {
-  try {
-    // Verify ElevenLabs credentials before starting
-    const credentialsValid = await verifyElevenLabsCredentials();
-    if (!credentialsValid) {
-      console.warn('⚠️ ElevenLabs credentials could not be verified. Server will start but calls may fail.');
-    }
-    
-    const address = await fastify.listen({ port: Number(PORT), host: HOST });
-    console.log(`🚀 Server listening at ${address}`);
-    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
-  } catch (err) {
+fastify.listen({ port: Number(PORT), host: HOST }, (err, address) => {
+  if (err) {
     console.error(`❌ Server failed to start: ${err.message}`);
     process.exit(1);
   }
-};
-
-startServer();
+  console.log(`🚀 Server listening at ${address}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
+});
 
 // Graceful shutdown
 const shutdown = () => {
