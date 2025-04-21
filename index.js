@@ -43,22 +43,34 @@ fastify.post('/outbound-call', async (req, reply) => {
   }
 });
 
-// Generate TwiML that starts streaming
-fastify.get('/twiml', async (req, reply) => {
-  const prompt = req.query.prompt || 'You are a helpful AI assistant.';
-  const firstMessage = req.query.firstMessage || 'Hi! This is Auto Agent AI calling.';
-  const safeMessage = escapeXml(firstMessage);
-
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+// Shared TwiML generator
+function generateTwiml(prompt, firstMessage) {
+  const safeMessage = escapeXml(firstMessage || 'Hi! This is Auto Agent AI calling.');
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
     <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
   <Say>${safeMessage}</Say>
 </Response>`;
+}
 
-  console.log('🚦 /twiml called with', req.query);
-  reply.type('text/xml').send(twiml);
+// Handle GET requests (for browser)
+fastify.get('/twiml', async (req, reply) => {
+  const prompt = req.query.prompt || '';
+  const firstMessage = req.query.firstMessage || '';
+  console.log('🚦 [GET] /twiml called with:', req.query);
+
+  reply.type('text/xml').send(generateTwiml(prompt, firstMessage));
+});
+
+// Handle POST requests (Twilio)
+fastify.post('/twiml', async (req, reply) => {
+  const prompt = req.body.prompt || '';
+  const firstMessage = req.body.firstMessage || '';
+  console.log('🚦 [POST] /twiml called with:', req.body);
+
+  reply.type('text/xml').send(generateTwiml(prompt, firstMessage));
 });
 
 // WebSocket handler (placeholder for ElevenLabs integration)
