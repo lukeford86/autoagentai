@@ -35,19 +35,22 @@ fastify.post('/outbound-call', async (req, reply) => {
 
 // Generate TwiML that starts streaming
 fastify.get('/twiml', async (req, reply) => {
-  const { prompt, firstMessage } = req.query;
-  const response = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+  const prompt = req.query.prompt || 'You are a helpful AI assistant.';
+  const firstMessage = req.query.firstMessage || 'Hi! This is Auto Agent AI calling.';
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url=\"wss://${req.hostname}/twilio-stream\" track=\"inbound\" content-type=\"audio/x-mulaw;rate=8000\" />
+    <Stream url="wss://${req.hostname}/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
   <Say>${firstMessage}</Say>
 </Response>`;
 
-  reply.type('text/xml').send(response);
+  console.log('🚦 /twiml called with', req.query);
+  reply.type('text/xml').send(twiml);
 });
 
-// WebSocket handler (we'll connect this to ElevenLabs soon)
+// WebSocket handler (placeholder for ElevenLabs integration)
 fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   console.log('🔌 Twilio stream opened');
 
