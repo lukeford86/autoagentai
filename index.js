@@ -56,6 +56,7 @@ function generateTwiml() {
   console.log('🧾 Generating TwiML with default agent settings');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Say>Connecting you to Auto Agent AI assistant now.</Say>
   <Start>
     <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
@@ -78,15 +79,19 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   console.log('🔌 Twilio stream opened');
 
   const agentId = ELEVENLABS_AGENT_ID;
+  // Use agent_id in query string to authenticate and select voice
+  const wsUrl = `wss://api.elevenlabs.io/v1/conversation?agent_id=${encodeURIComponent(agentId)}`;
+  console.log('🔗 Connecting to ElevenLabs WS:', wsUrl);
 
-  const elevenWs = new WebSocket('wss://api.elevenlabs.io/v1/conversation', {
-    headers: { 'xi-api-key': ELEVENLABS_API_KEY }
+  const elevenWs = new WebSocket(wsUrl, {
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+      'Accept': 'application/json'
+    }
   });
 
   elevenWs.on('open', () => {
-    console.log('🧠 Connected to ElevenLabs Conversational AI, agent_id:', agentId);
-    elevenWs.send(JSON.stringify({ agent_id: agentId }));
-    console.log('📝 Sent initial agent config to ElevenLabs');
+    console.log('🧠 ElevenLabs WS open');
   });
 
   conn.socket.on('message', (data) => {
@@ -108,8 +113,8 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
     elevenWs.close();
   });
 
-  elevenWs.on('close', () => console.log('🔌 ElevenLabs WebSocket closed'));
-  elevenWs.on('error', (err) => console.error('💥 ElevenLabs WebSocket error:', err));
+  elevenWs.on('close', () => console.log('🔌 ElevenLabs WS closed'));
+  elevenWs.on('error', (err) => console.error('💥 ElevenLabs WS error:', err));
 });
 
 fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' }, (err, address) => {
