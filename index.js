@@ -35,11 +35,22 @@ function generateTwiml() {
   <Pause length="600" />
 </Response>`;
 }
+
+// Outbound call trigger
+fastify.post('/outbound-call', async (req, reply) => {
+  const { phoneNumber } = req.body;
+  console.log('📞 Triggering call to:', phoneNumber);
+  try {
+    const call = await client.calls.create({
+      to: phoneNumber,
+      from: TWILIO_PHONE_NUMBER,
+      url: `https://${SERVER_DOMAIN || 'autoagentai.onrender.com'}/twiml`
+    });
     console.log('✅ Twilio call initiated. SID:', call.sid);
-    reply.send({ status: 'ok', sid: call.sid });
+    return reply.send({ status: 'ok', sid: call.sid });
   } catch (err) {
     console.error('❌ Twilio error:', err);
-    reply.status(500).send({ error: err.message });
+    return reply.status(500).send({ error: err.message });
   }
 });
 
