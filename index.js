@@ -31,63 +31,6 @@ if (!ELEVENLABS_API_KEY || !ELEVENLABS_AGENT_ID) {
 // Initialize Twilio client
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Get a signed URL from ElevenLabs
-async function getElevenLabsSignedUrl() {
-  return new Promise((resolve, reject) => {
-    console.log('📡 Getting signed URL from ElevenLabs...');
-    
-    // Prepare request data
-    const data = JSON.stringify({
-      agent_id: ELEVENLABS_AGENT_ID
-    });
-    
-    const options = {
-      hostname: 'api.elevenlabs.io',
-      port: 443,
-      path: '/v1/convai/conversation/get_signed_url',
-      method: 'POST',
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-        'Content-Type': 'application/json',
-        'Content-Length': data.length
-      }
-    };
-    
-    const req = https.request(options, (res) => {
-      let responseData = '';
-      
-      res.on('data', (chunk) => {
-        responseData += chunk;
-      });
-      
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const parsedResponse = JSON.parse(responseData);
-            console.log('✅ Received signed URL from ElevenLabs');
-            resolve(parsedResponse);
-          } catch (e) {
-            console.error(`❌ Error parsing signed URL response: ${e.message}`);
-            reject(new Error(`Failed to parse ElevenLabs response: ${e.message}`));
-          }
-        } else {
-          console.error(`❌ Failed to get signed URL: ${res.statusCode}`);
-          console.error(`Response: ${responseData}`);
-          reject(new Error(`HTTP error ${res.statusCode}: ${responseData}`));
-        }
-      });
-    });
-    
-    req.on('error', (e) => {
-      console.error(`❌ Error getting signed URL: ${e.message}`);
-      reject(e);
-    });
-    
-    req.write(data);
-    req.end();
-  });
-}
-
 // Register Fastify plugins
 fastify.register(require('@fastify/formbody'));
 fastify.register(require('@fastify/websocket'), {
@@ -189,24 +132,19 @@ fastify.post('/call-status', async (req, reply) => {
 });
 
 // WebSocket: Twilio <-> ElevenLabs
-fastify.get('/twilio-stream', { websocket: true }, async (connection, req) => {
+fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
+  const agentId = ELEVENLABS_AGENT_ID;
+  
+  // Use the direct WebSocket URL now that agent has authentication enabled
+  const elevenURL = `wss://api.elevenlabs.io/v1/convai/ws?agent_id=${agentId}`;
+  
   console.log('🔌 Twilio WebSocket connected');
-  console.log(`🌐 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
+  console.log(`🌐 Using ElevenLabs Agent ID: ${agentId}`);
+  console.log(`📡 ElevenLabs URL: ${elevenURL}`);
   
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 3;
   let isClosing = false;
-  
-  // Get signed URL from ElevenLabs before connecting
-  let signedUrlData;
-  try {
-    signedUrlData = await getElevenLabsSignedUrl();
-    console.log(`📝 Received signed URL with signature ID: ${signedUrlData.conversation_signature_id}`);
-  } catch (error) {
-    console.error(`❌ Failed to get signed URL: ${error.message}`);
-    connection.socket.close(1011, 'Failed to get ElevenLabs signed URL');
-    return;
-  }
   
   // Create ElevenLabs connection
   let elevenWs = null;
@@ -214,19 +152,18 @@ fastify.get('/twilio-stream', { websocket: true }, async (connection, req) => {
   const connectToElevenLabs = () => {
     if (isClosing) return;
     
-    // Use the signed URL received from ElevenLabs
-    const elevenURL = signedUrlData.ws_url;
-    console.log(`📡 Connecting to ElevenLabs with signed URL...`);
+    console.log(`📡 Connecting to ElevenLabs...`);
     
-    // Create the WebSocket connection
-    elevenWs = new WebSocket(elevenURL);
+    // Create the WebSocket connection with the API key in headers
+    elevenWs = new WebSocket(elevenURL, {
+      headers: { 
+        'xi-api-key': ELEVENLABS_API_KEY 
+      }
+    });
 
     elevenWs.on('open', () => {
       console.log('✅ ElevenLabs WebSocket open');
       reconnectAttempts = 0; // Reset reconnect counter on successful connection
-      
-      // If required, send an initial message (not needed with signed URLs)
-      console.log('✅ Connected to ElevenLabs with signed URL');
     });
     
     elevenWs.on('close', (code, reason) => {
@@ -236,25 +173,12 @@ fastify.get('/twilio-stream', { websocket: true }, async (connection, req) => {
       if (!isClosing && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         reconnectAttempts++;
         console.log(`🔄 Attempting to reconnect to ElevenLabs (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-        
-        // For reconnect, we need a new signed URL
-        getElevenLabsSignedUrl()
-          .then(newSignedUrlData => {
-            signedUrlData = newSignedUrlData;
-            console.log(`📝 Received new signed URL with signature ID: ${signedUrlData.conversation_signature_id}`);
-            setTimeout(connectToElevenLabs, 2000 * reconnectAttempts); // Exponential backoff
-          })
-          .catch(error => {
-            console.error(`❌ Failed to get new signed URL for reconnect: ${error.message}`);
-          });
+        setTimeout(connectToElevenLabs, 2000 * reconnectAttempts); // Exponential backoff
       }
     });
     
     elevenWs.on('error', err => {
       console.error(`❌ ElevenLabs WebSocket error: ${err.message}`);
-      if (err.message.includes('403')) {
-        console.error('This is an authentication error. Check your signed URL implementation.');
-      }
     });
     
     // Handle messages from ElevenLabs
@@ -262,18 +186,6 @@ fastify.get('/twilio-stream', { websocket: true }, async (connection, req) => {
       try {
         if (connection.socket.readyState === WebSocket.OPEN) {
           console.log(`📥 <- ElevenLabs | Response size: ${data.length} bytes`);
-          
-          // Check if it's a text message or binary audio
-          if (typeof data === 'string' || data instanceof Buffer && data[0] === '{'.charCodeAt(0)) {
-            // This might be a JSON message
-            try {
-              const jsonMsg = typeof data === 'string' ? data : data.toString();
-              console.log(`📥 <- ElevenLabs | Text message: ${jsonMsg.substring(0, 100)}...`);
-            } catch (e) {
-              // Not a text message, that's fine
-            }
-          }
-          
           connection.socket.send(data);
         }
       } catch (error) {
@@ -315,28 +227,15 @@ fastify.get('/twilio-stream', { websocket: true }, async (connection, req) => {
 });
 
 // Start server
-const startServer = async () => {
-  try {
-    // Try to get a signed URL to verify credentials
-    try {
-      const signedUrlData = await getElevenLabsSignedUrl();
-      console.log('✅ ElevenLabs authentication verified with signed URL');
-      console.log(`📝 Signature ID: ${signedUrlData.conversation_signature_id}`);
-    } catch (error) {
-      console.warn(`⚠️ Could not verify ElevenLabs signed URL: ${error.message}`);
-    }
-    
-    const address = await fastify.listen({ port: Number(PORT), host: HOST });
-    console.log(`🚀 Server listening at ${address}`);
-    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
-  } catch (err) {
+fastify.listen({ port: Number(PORT), host: HOST }, (err, address) => {
+  if (err) {
     console.error(`❌ Server failed to start: ${err.message}`);
     process.exit(1);
   }
-};
-
-startServer();
+  console.log(`🚀 Server listening at ${address}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
+});
 
 // Graceful shutdown
 const shutdown = () => {
