@@ -55,7 +55,11 @@ function generateTwiml(prompt, firstMessage) {
   <Start>
     <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
+  <Pause length="5" />
   <Say>${safeMessage}</Say>
+  <Pause length="60" />
+</Response>`;
+}</Say>
 </Response>`;
 }
 
