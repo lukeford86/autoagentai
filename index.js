@@ -28,18 +28,15 @@ const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 fastify.register(require('@fastify/formbody'));
 fastify.register(require('@fastify/websocket'));
 
-/**
- * Unified TwiML endpoint (GET for browser, POST for Twilio)
- * Streams raw audio to our /twilio-stream WebSocket
- */
+// Serve TwiML for Twilio
 async function handleTwiML(req, reply) {
-  fastify.log.info(`📡 TwiML endpoint hit: ${req.method} ${req.url}`);
+  const hostname = req.hostname.includes('localhost') ? `localhost:${PORT}` : req.hostname;
+  const streamUrl = `wss://${hostname}/twilio-stream?agent_id=${ELEVENLABS_AGENT_ID}`;
 
-  // Build XML that immediately opens the audio stream
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="wss://${req.hostname}/twilio-stream?agent_id=${ELEVENLABS_AGENT_ID}" track="inbound" content-type="audio/x-mulaw;rate=8000" />
+    <Stream url="${streamUrl}" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
 </Response>`;
 
@@ -49,10 +46,7 @@ async function handleTwiML(req, reply) {
 fastify.get('/twiml', handleTwiML);
 fastify.post('/twiml', handleTwiML);
 
-/**
- * Outbound call trigger
- * Expects JSON body: { phoneNumber: "+15558675309" }
- */
+// Outbound call trigger
 fastify.post('/outbound-call', async (req, reply) => {
   const { phoneNumber } = req.body;
   fastify.log.info(`📞 Outbound call requested to ${phoneNumber}`);
@@ -71,12 +65,7 @@ fastify.post('/outbound-call', async (req, reply) => {
   }
 });
 
-/**
- * WebSocket bridge:
- * - Receives raw audio from Twilio
- * - Forwards to ElevenLabs ConvAI
- * - Pipes AI-generated audio back into Twilio
- */
+// WebSocket: Twilio <-> ElevenLabs
 fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   fastify.log.info('🔌 Twilio WebSocket connected');
 
@@ -87,27 +76,22 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     headers: { 'xi-api-key': ELEVENLABS_API_KEY }
   });
 
-  elevenWs.on('open', () => fastify.log.info('✅ Connected to ElevenLabs ConvAI'));
-  elevenWs.on('error', err => fastify.log.error(err, '❌ ElevenLabs WebSocket error'));
+  elevenWs.on('open', () => fastify.log.info('✅ ElevenLabs WebSocket open'));
   elevenWs.on('close', () => fastify.log.info('🔌 ElevenLabs WebSocket closed'));
+  elevenWs.on('error', err => fastify.log.error(err, '❌ ElevenLabs WebSocket error'));
 
-  // Twilio -> ElevenLabs
   connection.socket.on('message', (audioChunk) => {
     if (elevenWs.readyState === WebSocket.OPEN) {
       elevenWs.send(audioChunk);
-      fastify.log.debug('🔄 Forwarded audio chunk to ElevenLabs');
     }
   });
 
-  // ElevenLabs -> Twilio
   elevenWs.on('message', (aiAudio) => {
     if (connection.socket.readyState === WebSocket.OPEN) {
       connection.socket.send(aiAudio);
-      fastify.log.debug('🔊 Sent AI audio chunk to Twilio');
     }
   });
 
-  // Cleanup on close
   connection.socket.on('close', () => {
     fastify.log.info('🔌 Twilio WebSocket closed');
     elevenWs.close();
