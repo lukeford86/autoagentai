@@ -1,0 +1,13 @@
+{
+  "name": "autoagentai",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "fastify": "^4.0.0",
+    "@fastify/formbody": "^7.0.0",
+    "@fastify/websocket": "^7.0.0"
+  }
+}
