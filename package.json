@@ -2,7 +2,9 @@
   "name": "autoagentai",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "dotenv": "^16.0.0",
     "fastify": "^4.0.0",
