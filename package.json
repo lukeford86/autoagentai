@@ -2,20 +2,14 @@
   "name": "autoagentai",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
-    "@fastify/formbody": "^7.0.0",
-    "@fastify/websocket": "^8.0.0",
     "dotenv": "^16.0.0",
     "fastify": "^4.0.0",
-    "node‑fetch": "^2.6.7",   // or v3 with `import` syntax
+    "@fastify/formbody": "^7.0.0",
+    "@fastify/websocket": "^8.0.0",
     "twilio": "^4.0.0",
+    "node‑fetch": "^2.6.7",
     "ws": "^8.0.0"
-  },
-  "scripts": {
-    "start": "node index.js"
   }
 }
-
