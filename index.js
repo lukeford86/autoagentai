@@ -1,7 +1,7 @@
 // index.js
 require('dotenv').config();
 const Fastify = require('fastify');
-const fetch = require('node-fetch'); // use node-fetch for getSignedUrl
+// Using Node 18+ built-in fetch; no need for 'node-fetch'
 const WebSocket = require('ws');
 const twilio = require('twilio');
 
@@ -46,8 +46,7 @@ async function getSignedUrl() {
   return signed_url;
 }
 
-// Route: trigger outbound call via Twilio
-fastify.post('/outbound-call', async (req, reply) => {
+// Route: trigger outbound call via Twilio\ nfastify.post('/outbound-call', async (req, reply) => {
   const { phoneNumber } = req.body;
   try {
     const call = await client.calls.create({
@@ -116,7 +115,6 @@ fastify.register(async (instance) => {
             break;
           case 'media':
             if (elevenWs && elevenWs.readyState === WebSocket.OPEN) {
-              // Forward only the payload
               const payload = event.media.payload;
               elevenWs.send(JSON.stringify({ user_audio_chunk: payload }));
               fastify.log.debug('Forwarded user audio chunk');
