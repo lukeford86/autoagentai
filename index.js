@@ -3,6 +3,7 @@ require('dotenv').config();
 const fastify = require('fastify')({ logger: true });
 const WebSocket = require('ws');
 const twilio = require('twilio');
+const https = require('https');
 
 // Load configuration from environment
 const {
@@ -25,6 +26,121 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
 if (!ELEVENLABS_API_KEY || !ELEVENLABS_AGENT_ID) {
   console.error('❌ Missing ElevenLabs environment variables.');
   process.exit(1);
+}
+
+// Verify ElevenLabs credentials
+function verifyElevenLabsCredentials() {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.elevenlabs.io',
+      port: 443,
+      path: '/v1/user/subscription',
+      method: 'GET',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            const subscription = JSON.parse(data);
+            console.log('✅ ElevenLabs API key valid');
+            console.log(`📊 Subscription tier: ${subscription.tier}`);
+            console.log(`📊 Character count: ${subscription.character_count} / ${subscription.character_limit}`);
+            resolve(true);
+          } catch (e) {
+            console.error(`❌ Error parsing ElevenLabs response: ${e.message}`);
+            resolve(false);
+          }
+        } else {
+          console.error(`❌ ElevenLabs API key validation failed: ${res.statusCode}`);
+          console.error(`Response: ${data}`);
+          resolve(false);
+        }
+      });
+    });
+
+    req.on('error', (e) => {
+      console.error(`❌ Error verifying ElevenLabs credentials: ${e.message}`);
+      resolve(false);
+    });
+
+    req.end();
+  });
+}
+
+// Check if agent exists in ElevenLabs
+function verifyElevenLabsAgent() {
+  return new Promise((resolve, reject) => {
+    // First try to list all agents
+    const options = {
+      hostname: 'api.elevenlabs.io',
+      port: 443,
+      path: '/v1/convai/agents',
+      method: 'GET',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            const response = JSON.parse(data);
+            console.log(`📊 Found ${response.agents.length} agents in ElevenLabs account`);
+            
+            // Search for our agent
+            const agent = response.agents.find(a => a.agent_id === ELEVENLABS_AGENT_ID);
+            
+            if (agent) {
+              console.log(`✅ Found agent "${agent.name}" with ID: ${agent.agent_id}`);
+              resolve(agent);
+            } else {
+              console.error(`❌ Could not find agent with ID: ${ELEVENLABS_AGENT_ID}`);
+              
+              // Log available agents to help debug
+              response.agents.forEach(a => {
+                console.log(`Available agent: "${a.name}" - ID: ${a.agent_id}`);
+              });
+              
+              resolve(null);
+            }
+          } catch (e) {
+            console.error(`❌ Error parsing ElevenLabs agents: ${e.message}`);
+            resolve(null);
+          }
+        } else {
+          console.error(`❌ Failed to fetch ElevenLabs agents: ${res.statusCode}`);
+          console.error(`Response: ${data}`);
+          resolve(null);
+        }
+      });
+    });
+
+    req.on('error', (e) => {
+      console.error(`❌ Error checking ElevenLabs agent: ${e.message}`);
+      resolve(null);
+    });
+
+    req.end();
+  });
 }
 
 // Initialize Twilio client
@@ -134,7 +250,7 @@ fastify.post('/call-status', async (req, reply) => {
 fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   const agentId = ELEVENLABS_AGENT_ID;
   
-  // THIS IS THE CORRECT ENDPOINT FOR CONVAI AGENTS
+  // This is the correct URL format for ElevenLabs Convai
   const elevenURL = `wss://api.elevenlabs.io/v1/convai/ws?agent_id=${agentId}`;
   
   console.log('🔌 Twilio WebSocket connected');
@@ -153,12 +269,19 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     
     console.log(`📡 Connecting to ElevenLabs...`);
     
-    // Create the WebSocket connection with the API key in headers
-    elevenWs = new WebSocket(elevenURL, {
-      headers: { 
-        'xi-api-key': ELEVENLABS_API_KEY 
-      }
-    });
+    // Prepare WebSocket options with authorization header
+    const wsOptions = {
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY
+      },
+      // Enable additional debugging
+      perMessageDeflate: false
+    };
+    
+    console.log(`🔑 Using API key: ${ELEVENLABS_API_KEY.substring(0, 3)}...${ELEVENLABS_API_KEY.slice(-3)}`);
+    
+    // Create the WebSocket connection
+    elevenWs = new WebSocket(elevenURL, wsOptions);
 
     elevenWs.on('open', () => {
       console.log('✅ ElevenLabs WebSocket open');
@@ -178,6 +301,9 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     
     elevenWs.on('error', err => {
       console.error(`❌ ElevenLabs WebSocket error: ${err.message}`);
+      if (err.message.includes('403')) {
+        console.error('This is an authentication error. Your API key may not have access to this agent or the Convai API.');
+      }
     });
     
     // Handle messages from ElevenLabs
@@ -226,15 +352,33 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
 });
 
 // Start server
-fastify.listen({ port: Number(PORT), host: HOST }, (err, address) => {
-  if (err) {
+const startServer = async () => {
+  try {
+    console.log('🔍 Verifying ElevenLabs credentials...');
+    const credentialsValid = await verifyElevenLabsCredentials();
+    
+    if (!credentialsValid) {
+      console.warn('⚠️ ElevenLabs credentials could not be verified. Server will start but calls may fail.');
+    } else {
+      console.log('🔍 Checking ElevenLabs agent...');
+      const agent = await verifyElevenLabsAgent();
+      
+      if (!agent) {
+        console.warn('⚠️ ElevenLabs agent not found. Please verify your agent ID.');
+      }
+    }
+    
+    const address = await fastify.listen({ port: Number(PORT), host: HOST });
+    console.log(`🚀 Server listening at ${address}`);
+    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
+  } catch (err) {
     console.error(`❌ Server failed to start: ${err.message}`);
     process.exit(1);
   }
-  console.log(`🚀 Server listening at ${address}`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
-});
+};
+
+startServer();
 
 // Graceful shutdown
 const shutdown = () => {
