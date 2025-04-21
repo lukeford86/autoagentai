@@ -32,6 +32,8 @@ const escapeXml = (unsafe) =>
 fastify.post('/outbound-call', async (req, reply) => {
   const { phoneNumber, prompt, firstMessage } = req.body;
   console.log('📞 Triggering call to:', phoneNumber);
+  console.log('📤 Prompt:', prompt);
+  console.log('📤 First message:', firstMessage);
 
   try {
     const call = await client.calls.create({
@@ -40,6 +42,7 @@ fastify.post('/outbound-call', async (req, reply) => {
       url: `https://autoagentai.onrender.com/twiml?prompt=${encodeURIComponent(prompt)}&firstMessage=${encodeURIComponent(firstMessage)}`
     });
 
+    console.log('✅ Twilio call initiated. SID:', call.sid);
     reply.send({ status: 'ok', sid: call.sid });
   } catch (err) {
     console.error('❌ Twilio error:', err);
@@ -50,12 +53,12 @@ fastify.post('/outbound-call', async (req, reply) => {
 // Shared TwiML generator
 function generateTwiml(prompt, firstMessage) {
   const safeMessage = escapeXml(firstMessage || 'Hi! This is Auto Agent AI calling.');
+  console.log('🧾 Generating TwiML for message:', safeMessage);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
     <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
-  <Pause length="5" />
   <Say>${safeMessage}</Say>
   <Pause length="60" />
 </Response>`;
@@ -82,8 +85,10 @@ fastify.post('/twiml', async (req, reply) => {
 // WebSocket handler with ElevenLabs Conversational AI integration
 fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   console.log('🔌 Twilio stream opened');
+  console.log('🔍 Request query:', req.query);
 
   const firstMessage = req.query.firstMessage || 'Hi! This is Auto Agent AI calling.';
+  const agentId = ELEVENLABS_AGENT_ID;
 
   const elevenWs = new WebSocket('wss://api.elevenlabs.io/v1/conversation', {
     headers: {
@@ -95,28 +100,37 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   elevenWs.on('open', () => {
     console.log('🧠 Connected to ElevenLabs Conversational AI');
     elevenWs.send(JSON.stringify({
-      agent_id: ELEVENLABS_AGENT_ID,
+      agent_id: agentId,
       first_message: firstMessage
     }));
+    console.log('📝 Sent agent_id and first_message to ElevenLabs');
   });
 
   conn.socket.on('message', (data) => {
     if (elevenWs.readyState === WebSocket.OPEN) {
       elevenWs.send(data);
+      console.log('🔄 Sent audio chunk to ElevenLabs');
     }
   });
 
-  elevenWs.on('message', (audio) => {
-    // Send audio back to Twilio
+  elevenWs.on('message', (msg) => {
     if (conn.socket.readyState === WebSocket.OPEN) {
-      conn.socket.send(audio);
-      console.log('🗣️ Forwarded audio to Twilio');
+      conn.socket.send(msg);
+      console.log('🗣️ Forwarded AI audio to Twilio');
     }
   });
 
   conn.socket.on('close', () => {
     console.log('❌ Twilio stream closed');
     elevenWs.close();
+  });
+
+  elevenWs.on('close', () => {
+    console.log('🔌 ElevenLabs WebSocket closed');
+  });
+
+  elevenWs.on('error', (err) => {
+    console.error('💥 ElevenLabs WebSocket error:', err);
   });
 });
 
