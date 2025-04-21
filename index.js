@@ -23,7 +23,7 @@ fastify.post('/outbound-call', async (req, reply) => {
     const call = await client.calls.create({
       to: phoneNumber,
       from: TWILIO_PHONE_NUMBER,
-      url: `https://${req.hostname}/twiml?prompt=${encodeURIComponent(prompt)}&firstMessage=${encodeURIComponent(firstMessage)}`
+      url: `https://autoagentai.onrender.com/twiml?prompt=${encodeURIComponent(prompt)}&firstMessage=${encodeURIComponent(firstMessage)}`
     });
 
     reply.send({ status: 'ok', sid: call.sid });
@@ -41,7 +41,7 @@ fastify.get('/twiml', async (req, reply) => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="wss://${req.hostname}/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
+    <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
   <Say>${firstMessage}</Say>
 </Response>`;
