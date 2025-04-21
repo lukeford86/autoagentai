@@ -1,6 +1,6 @@
 // index.js
 require('dotenv').config();
-const fastify = require('fastify')({ logger: true }); // Enable logging for better debugging
+const fastify = require('fastify')({ logger: true });
 const WebSocket = require('ws');
 const twilio = require('twilio');
 
@@ -81,7 +81,7 @@ function getServerUrl(request) {
 async function handleTwiML(req, reply) {
   const hostname = getServerUrl(req);
   const protocol = hostname.includes('localhost') ? 'ws' : 'wss';
-  const streamUrl = `${protocol}://${hostname}/twilio-stream?agent_id=${ELEVENLABS_AGENT_ID}`;
+  const streamUrl = `${protocol}://${hostname}/twilio-stream`;
   
   console.log(`🧭 Generated stream URL: ${streamUrl}`);
 
@@ -89,11 +89,9 @@ async function handleTwiML(req, reply) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="${streamUrl}" track="inbound_track" content-type="audio/x-mulaw;rate=8000">
-      <Parameter name="agent_id" value="${ELEVENLABS_AGENT_ID}" />
-    </Stream>
+    <Stream url="${streamUrl}" track="inbound_track" content-type="audio/x-mulaw;rate=8000" />
   </Start>
-  <Pause length="60" />
+  <Pause length="300" />
 </Response>`;
 
   console.log('📤 Sending TwiML response');
@@ -155,7 +153,8 @@ fastify.post('/call-status', twilioRouteConfig, async (req, reply) => {
 
 // WebSocket: Twilio <-> ElevenLabs
 fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
-  const agentId = req.query.agent_id || ELEVENLABS_AGENT_ID;
+  // IMPORTANT FIX: Use ELEVENLABS_AGENT_ID directly instead of from query params
+  const agentId = ELEVENLABS_AGENT_ID;
   const elevenURL = `wss://api.elevenlabs.io/v1/convai/ws?agent_id=${agentId}`;
 
   console.log('🔌 Twilio WebSocket connected');
@@ -170,6 +169,8 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   
   const connectToElevenLabs = () => {
     if (isClosing) return;
+    
+    console.log(`📡 Connecting to ElevenLabs at ${elevenURL}`);
     
     elevenWs = new WebSocket(elevenURL, {
       headers: { 'xi-api-key': ELEVENLABS_API_KEY }
@@ -259,6 +260,7 @@ fastify.listen({ port: Number(PORT), host: HOST }, (err, address) => {
   }
   console.log(`🚀 Server listening at ${address}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🤖 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
 });
 
 // Graceful shutdown
