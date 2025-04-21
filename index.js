@@ -14,23 +14,37 @@ const {
   TWILIO_AUTH_TOKEN,
   TWILIO_PHONE_NUMBER,
   ELEVENLABS_API_KEY,
-  ELEVENLABS_AGENT_ID
+  ELEVENLABS_AGENT_ID,
+  SERVER_DOMAIN
 } = process.env;
 
 // Twilio client
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Generate TwiML for Twilio callbacks (streams audio both ways)
+// Generate TwiML for streaming audio
 function generateTwiml() {
   console.log('🧾 Generating TwiML for streaming');
+  const domain = SERVER_DOMAIN || 'autoagentai.onrender.com';
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="wss://${process.env.SERVER_DOMAIN || 'autoagentai.onrender.com'}/twilio-stream" track="both" />
+    <Stream url="wss://${domain}/twilio-stream" track="both" />
   </Start>
   <Pause length="600" />
 </Response>`;
 }
+
+// Outbound call trigger
+fastify.post('/outbound-call', async (req, reply) => {
+  const { phoneNumber } = req.body;
+  console.log('📞 Triggering call to:', phoneNumber);
+
+  try {
+    const call = await client.calls.create({
+      to: phoneNumber,
+      from: TWILIO_PHONE_NUMBER,
+      url: `https://${SERVER_DOMAIN || 'autoagentai.onrender.com'}/twiml`
+    });
     console.log('✅ Twilio call initiated. SID:', call.sid);
     reply.send({ status: 'ok', sid: call.sid });
   } catch (err) {
@@ -53,7 +67,6 @@ fastify.route({
 fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
   console.log('🔌 Twilio stream opened');
 
-  // Correct ElevenLabs WebSocket URL
   const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(ELEVENLABS_AGENT_ID)}`;
   console.log('🔗 Connecting to ElevenLabs WS:', wsUrl);
 
@@ -61,7 +74,7 @@ fastify.get('/twilio-stream', { websocket: true }, (conn, req) => {
     headers: { 'xi-api-key': ELEVENLABS_API_KEY }
   });
 
-  elevenWs.on('open', () => console.log('🧠 ElevenLabs WS open'));  
+  elevenWs.on('open', () => console.log('🧠 ElevenLabs WS open'));
   elevenWs.on('error', err => console.error('💥 ElevenLabs WS error:', err));
   elevenWs.on('close', () => console.log('🔌 ElevenLabs WS closed'));
 
