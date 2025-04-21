@@ -14,6 +14,16 @@ const {
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
+// Escape XML characters
+const escapeXml = (unsafe) =>
+  unsafe.replace(/[<>&'"]/g, (c) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    "'": '&apos;',
+    '"': '&quot;',
+  })[c]);
+
 // Outbound call trigger
 fastify.post('/outbound-call', async (req, reply) => {
   const { phoneNumber, prompt, firstMessage } = req.body;
@@ -37,13 +47,14 @@ fastify.post('/outbound-call', async (req, reply) => {
 fastify.get('/twiml', async (req, reply) => {
   const prompt = req.query.prompt || 'You are a helpful AI assistant.';
   const firstMessage = req.query.firstMessage || 'Hi! This is Auto Agent AI calling.';
+  const safeMessage = escapeXml(firstMessage);
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
     <Stream url="wss://autoagentai.onrender.com/twilio-stream" track="inbound" content-type="audio/x-mulaw;rate=8000" />
   </Start>
-  <Say>${firstMessage}</Say>
+  <Say>${safeMessage}</Say>
 </Response>`;
 
   console.log('🚦 /twiml called with', req.query);
