@@ -64,7 +64,7 @@ async function handleTwiML(req, reply) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="${streamUrl}" track="inbound_track" content-type="audio/x-mulaw;rate=8000" />
+    <Stream url="${streamUrl}" />
   </Start>
   <Pause length="300" />
 </Response>`;
@@ -133,13 +133,12 @@ fastify.post('/call-status', async (req, reply) => {
 
 // WebSocket: Twilio <-> ElevenLabs
 fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
-  const agentId = ELEVENLABS_AGENT_ID;
-  
-  // Use the direct WebSocket URL now that agent has authentication enabled
-  const elevenURL = `wss://api.elevenlabs.io/v1/convai/ws?agent_id=${agentId}`;
-  
   console.log('🔌 Twilio WebSocket connected');
-  console.log(`🌐 Using ElevenLabs Agent ID: ${agentId}`);
+  
+  // The WebSocket URL for ElevenLabs Conversational AI - EXACTLY as specified in docs
+  const elevenURL = `wss://api.elevenlabs.io/v1/conversation`;
+  
+  console.log(`🌐 Using ElevenLabs Agent ID: ${ELEVENLABS_AGENT_ID}`);
   console.log(`📡 ElevenLabs URL: ${elevenURL}`);
   
   let reconnectAttempts = 0;
@@ -157,13 +156,28 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     // Create the WebSocket connection with the API key in headers
     elevenWs = new WebSocket(elevenURL, {
       headers: { 
-        'xi-api-key': ELEVENLABS_API_KEY 
+        'xi-api-key': ELEVENLABS_API_KEY
       }
     });
 
     elevenWs.on('open', () => {
       console.log('✅ ElevenLabs WebSocket open');
-      reconnectAttempts = 0; // Reset reconnect counter on successful connection
+      
+      // Send the agent ID message immediately after connection
+      // This is REQUIRED per the WebSocket API docs
+      try {
+        const initMessage = JSON.stringify({
+          type: "agent",
+          agent_id: ELEVENLABS_AGENT_ID,
+          session_id: `twilio-call-${Date.now()}`
+        });
+        console.log(`📤 Sending agent initialization: ${initMessage}`);
+        elevenWs.send(initMessage);
+      } catch (error) {
+        console.error(`❌ Error sending agent initialization: ${error.message}`);
+      }
+      
+      reconnectAttempts = 0; // Reset reconnect counter
     });
     
     elevenWs.on('close', (code, reason) => {
@@ -179,13 +193,31 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
     
     elevenWs.on('error', err => {
       console.error(`❌ ElevenLabs WebSocket error: ${err.message}`);
+      if (err.message.includes('403')) {
+        console.error('This is an authentication error. Please verify your API key and agent settings.');
+        console.error('Make sure your subscription plan includes Conversational AI capabilities.');
+      }
     });
     
     // Handle messages from ElevenLabs
     elevenWs.on('message', (data) => {
       try {
         if (connection.socket.readyState === WebSocket.OPEN) {
-          console.log(`📥 <- ElevenLabs | Response size: ${data.length} bytes`);
+          // Try to parse as JSON first to see if it's a control message
+          try {
+            const jsonData = JSON.parse(data.toString());
+            console.log(`📥 <- ElevenLabs | JSON message:`, jsonData);
+            
+            // If it's not audio data, no need to forward to Twilio
+            if (jsonData.type !== 'audio') {
+              return;
+            }
+          } catch (e) {
+            // Not JSON, assume it's binary audio data
+            console.log(`📥 <- ElevenLabs | Binary audio data: ${data.length} bytes`);
+          }
+          
+          // Forward the data to Twilio
           connection.socket.send(data);
         }
       } catch (error) {
@@ -201,8 +233,32 @@ fastify.get('/twilio-stream', { websocket: true }, (connection, req) => {
   connection.socket.on('message', (audioChunk) => {
     try {
       if (elevenWs && elevenWs.readyState === WebSocket.OPEN) {
-        console.log(`📤 -> ElevenLabs | Audio chunk size: ${audioChunk.length} bytes`);
-        elevenWs.send(audioChunk);
+        // Check if it's a binary audio chunk or a JSON message
+        let isJson = false;
+        try {
+          // Check if it starts with a bracket (JSON)
+          if (audioChunk[0] === '{'.charCodeAt(0)) {
+            isJson = true;
+            const jsonMsg = JSON.parse(audioChunk.toString());
+            console.log(`📤 -> ElevenLabs | JSON message from Twilio:`, jsonMsg);
+          }
+        } catch (e) {
+          // Not JSON, that's fine
+        }
+        
+        if (!isJson) {
+          // Package the binary audio data in the correct format
+          const audioMessage = {
+            type: "audio",
+            data: audioChunk.toString('base64')
+          };
+          
+          console.log(`📤 -> ElevenLabs | Audio data: ${audioChunk.length} bytes`);
+          elevenWs.send(JSON.stringify(audioMessage));
+        } else {
+          // It's already JSON, send as is
+          elevenWs.send(audioChunk);
+        }
       } else {
         console.warn('⚠️ ElevenLabs WebSocket not ready, dropping audio chunk');
       }
