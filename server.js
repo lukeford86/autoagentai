@@ -8,23 +8,25 @@ const WebSocket = require('ws');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Setup JSON body parser
+// Setup body parsing (optional but harmless)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Load environment variables
+// Environment variables
 const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
 const openRouterApiKey = process.env.OPENROUTER_API_KEY;
 const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
 
 const deepgram = new Deepgram(deepgramApiKey);
 
-// --- Serve TwiML ---
+// --- Serve dynamic TwiML ---
 app.all('/twiml', (req, res) => {
   try {
     console.log('✅ [TwiML] /twiml hit');
 
-    const params = req.method === 'GET' ? req.query : req.body;
+    // Always pull from query (Twilio posts query params)
+    const params = req.query;
+
     const agentId = params.agent_id;
     const voiceId = params.voice_id;
     const contactName = params.contact_name;
@@ -73,37 +75,23 @@ wss.on('connection', (ws, req) => {
       sample_rate: 8000,
     });
 
-    deepgramSocket.on('open', () => {
-      console.log('🔗 [Deepgram] Connected successfully');
-    });
-
-    deepgramSocket.on('error', (error) => {
-      console.error('❌ [Deepgram] Connection Error:', error);
-    });
-
-    deepgramSocket.on('close', () => {
-      console.log('🔒 [Deepgram] Socket closed');
-    });
+    deepgramSocket.on('open', () => console.log('🔗 [Deepgram] Connected successfully'));
+    deepgramSocket.on('error', (error) => console.error('❌ [Deepgram Error]:', error));
+    deepgramSocket.on('close', () => console.log('🔒 [Deepgram] Socket closed'));
 
     ws.on('message', async (data) => {
       try {
         const message = JSON.parse(data);
-
-        console.log('📥 [Twilio] Message Event:', message.event);
 
         if (message.event === 'start') {
           console.log(`✅ [Twilio] Call Started: ${message.streamSid}`);
         }
 
         if (message.event === 'media') {
-          console.log('🎤 [Twilio] Media Packet Received');
           const audioData = message.media.payload;
           const buffer = Buffer.from(audioData, 'base64');
-
           if (deepgramSocket.readyState === 1) {
             deepgramSocket.send(buffer);
-          } else {
-            console.warn('⚠️ [Deepgram] Not ready to receive audio');
           }
         }
 
@@ -113,20 +101,18 @@ wss.on('connection', (ws, req) => {
           deepgramSocket.finish();
         }
       } catch (err) {
-        console.error('❌ [Twilio WebSocket Message Error]:', err);
+        console.error('❌ [WebSocket Message Error]:', err);
       }
     });
 
     ws.on('close', () => {
-      console.log('🔒 [Twilio] WebSocket closed');
+      console.log('🔒 [WebSocket] Connection closed');
       if (deepgramSocket.readyState === 1) {
         deepgramSocket.finish();
       }
     });
 
-    ws.on('error', (error) => {
-      console.error('❌ [Twilio] WebSocket Error:', error);
-    });
+    ws.on('error', (error) => console.error('❌ [WebSocket Error]:', error));
 
     deepgramSocket.on('transcriptReceived', async (data) => {
       try {
@@ -140,24 +126,17 @@ wss.on('connection', (ws, req) => {
           audioStream.on('data', (chunk) => {
             if (ws.readyState === WebSocket.OPEN) {
               const payload = Buffer.from(chunk).toString('base64');
-              const message = JSON.stringify({
-                event: 'media',
-                media: {
-                  payload: payload
-                }
-              });
-              ws.send(message);
+              ws.send(JSON.stringify({ event: 'media', media: { payload } }));
             }
           });
 
-          audioStream.on('end', () => {
-            console.log('✅ [ElevenLabs] Finished streaming back to Twilio');
-          });
+          audioStream.on('end', () => console.log('✅ [ElevenLabs] Finished streaming to Twilio'));
         }
       } catch (err) {
-        console.error('❌ [Transcript Processing Error]:', err);
+        console.error('❌ [Transcript Handling Error]:', err);
       }
     });
+
   } catch (err) {
     console.error('❌ [WebSocket Server Error]:', err);
   }
@@ -165,7 +144,7 @@ wss.on('connection', (ws, req) => {
 
 // --- GPT Reply Function ---
 async function generateReplyFromGPT(userText, contactName, address) {
-  const systemPrompt = `You are a friendly real estate agent AI assistant. You are calling ${contactName} about their property at ${address}. Offer a free property valuation, mention recent sales nearby, and book a time for a free update. Be natural, professional, and confident.`;
+  const systemPrompt = `You are a helpful real estate agent AI assistant. You are calling ${contactName} about their property at ${address}. Offer a free property valuation and ask if they'd like an update about recent local sales. Be natural and professional.`;
 
   const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
     model: 'gpt-4o',
