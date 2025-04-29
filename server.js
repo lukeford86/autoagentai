@@ -1,62 +1,61 @@
-// server.js
-const express = require('express');
-const http = require('http');
-const { VoiceResponse } = require('twilio').twiml;
-const WebSocket = require('ws');
+// src/server.js
+const express       = require('express');
+const { urlencoded }= require('express');
+const http          = require('http');
+const WebSocket     = require('ws');
+const { twiml: { VoiceResponse } } = require('twilio');
 
 const app = express();
 
-// Parse application/x-www-form-urlencoded (what Twilio POSTs to /twiml)
-app.use(express.urlencoded({ extended: true }));
+// 1) parse application/x-www-form-urlencoded (Twilio POSTS this)
+app.use(urlencoded({ extended: true }));
 
-// Your TwiML endpoint
+// 2) Your TwiML webhook
 app.post('/twiml', (req, res) => {
-  const { agent_id, voice_id, contact_name, address } = req.body;
-  console.log('➡️ [TwiML] Received:', { agent_id, voice_id, contact_name, address });
+  // Pull your custom params out of the query string (or body, if you ever choose)
+  const params = {
+    agent_id:     req.query.agent_id     || req.body.agent_id,
+    voice_id:     req.query.voice_id     || req.body.voice_id,
+    contact_name: req.query.contact_name || req.body.contact_name,
+    address:      req.query.address      || req.body.address,
+  };
 
-  // Build a <Say> response
-  const twiml = new VoiceResponse();
-  twiml.say(
-    { voice: 'alice', language: 'en-US' },
-    `Hi ${contact_name}, just confirming your appointment at ${address}.`
-  );
+  console.log('[TwiML] Received:', params);
 
-  res.type('text/xml').send(twiml.toString());
+  // Build TwiML
+  const response = new VoiceResponse();
+  const connect  = response.connect();
+  const stream   = connect.stream({ url: `wss://${req.headers.host}/media` });
+
+  // Attach each parameter
+  for (const [name, value] of Object.entries(params)) {
+    stream.parameter({ name, value });
+  }
+
+  // Give yourself 30s to do the TTS / WebSocket dance
+  stream.pause({ length: 30 });
+
+  // Send back XML
+  res.type('text/xml').send(response.toString());
 });
 
-// (Optional) WebSocket server if you want to receive caller audio via <Connect><Stream>
+// 3) Upgrade path for your media‐stream WebSocket
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/media' });
+const wss    = new WebSocket.Server({ noServer: true });
 
-wss.on('connection', ws => {
-  console.log('✅ [WebSocket] connected');
-
-  ws.on('message', raw => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (err) {
-      return console.warn('⚠️ [WebSocket] non-JSON frame');
-    }
-
-    if (msg.event === 'start') {
-      console.log('📡 [WebSocket] start payload:', JSON.stringify(msg.start, null, 2));
-      // you can inspect: msg.start.customParameters, msg.start.streamSid, etc.
-    }
-
-    if (msg.event === 'media') {
-      // Here you’ll get inbound audio chunks as base64.  You might
-      // send them on to a speech-to-text service, etc.
-      // console.log('📡 [WebSocket] got media chunk', msg.media.chunk);
-    }
-  });
-
-  ws.on('close', code => console.log(`🛑 [WebSocket] closed ${code}`));
-  ws.on('error', err => console.error('❌ [WebSocket] error', err));
+server.on('upgrade', (req, socket, head) => {
+  if (req.url.startsWith('/media')) {
+    wss.handleUpgrade(req, socket, head, ws => {
+      ws.on('message', msg => {
+        // handle media frames here…
+      });
+    });
+  } else {
+    socket.destroy();
+  }
 });
 
-// start both HTTP + WS on same port
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`✅ Server listening on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
