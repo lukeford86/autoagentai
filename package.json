@@ -1,15 +1,20 @@
 {
-  "name": "autoagent-stream",
+  "name": "ai-voice-agent",
   "version": "1.0.0",
-  "main": "src/server.js",
+  "description": "A Twilio-based AI voice agent using Deepgram STT, OpenRouter for AI and ElevenLabs TTS",
+  "main": "server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=14"
   },
   "dependencies": {
-    "body-parser": "^1.20.2",
-    "dotenv": "^16.0.3",
+    "@deepgram/sdk": "^2.0.0",
+    "dotenv": "^16.0.0",
     "express": "^4.18.2",
-    "twilio": "^4.11.0",
+    "node-fetch": "^3.3.1",
+    "twilio": "^4.17.0",
     "ws": "^8.13.0"
   }
 }
