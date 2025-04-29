@@ -25,3 +25,47 @@ app.get('/twiml', (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server is running on port ${PORT}`);
 });
+const http = require('http');
+const WebSocket = require('ws');
+
+// Create a raw HTTP server
+const server = http.createServer(app);
+
+// Attach WebSocket server to it
+const wss = new WebSocket.Server({ server, path: '/media' });
+
+// Handle WebSocket connections
+wss.on('connection', (ws, req) => {
+  console.log('📞 Twilio Media Stream connected');
+
+  ws.on('message', (data) => {
+    const message = JSON.parse(data);
+
+    if (message.event === 'start') {
+      console.log(`✅ Call started with stream SID: ${message.streamSid}`);
+    }
+
+    if (message.event === 'media') {
+      // Incoming audio chunks
+      const audioData = message.media.payload; // base64 audio
+
+      // For now: just log we are receiving audio
+      console.log(`🎙️ Receiving audio data...`);
+      // Later: pipe this audio to Deepgram
+    }
+
+    if (message.event === 'stop') {
+      console.log(`🛑 Call ended for stream SID: ${message.streamSid}`);
+      ws.close();
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('🔒 WebSocket connection closed');
+  });
+});
+
+// Change only the *listening* line at the bottom:
+server.listen(PORT, () => {
+  console.log(`✅ Server listening on port ${PORT}`);
+});
