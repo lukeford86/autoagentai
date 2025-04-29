@@ -2,21 +2,22 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const cors = require('cors');
-const app = express();
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
-// Setup HTTP server manually for ws upgrade handling
+const app = express();
 const server = http.createServer(app);
 const port = process.env.PORT || 10000;
 
-// Allow CORS
 app.use(cors());
 
-// Route: Health check
+// Health check
 app.get('/', (req, res) => {
   res.send('✅ AI Call Server is live');
 });
 
-// Route: TwiML endpoint
+// TwiML endpoint
 app.all('/twiml', (req, res) => {
   const { agent_id, voice_id, contact_name, address } = req.query;
 
@@ -40,21 +41,20 @@ app.all('/twiml', (req, res) => {
   res.send(twiml.trim());
 });
 
-// WebSocket Server
+// WebSocket server
 const wss = new WebSocket.Server({ noServer: true });
 
-server.on('upgrade', (request, socket, head) => {
-  if (request.url.startsWith('/media')) {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
+server.on('upgrade', (req, socket, head) => {
+  if (req.url.startsWith('/media')) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
     });
   } else {
     socket.destroy();
   }
 });
 
-// WebSocket Connection Handler
-wss.on('connection', (ws, req) => {
+wss.on('connection', async (ws, req) => {
   const urlParams = new URLSearchParams(req.url.replace('/media?', ''));
   const agentId = urlParams.get('agent_id');
   const voiceId = urlParams.get('voice_id');
@@ -63,9 +63,49 @@ wss.on('connection', (ws, req) => {
 
   console.log(`🎤 WebSocket connected for ${contactName} @ ${address}`);
 
+  const aiMessage = `Hi ${contactName}, just confirming your appointment at ${address}.`;
+  const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY;
+  const audioPath = path.join(__dirname, 'output.wav');
+
+  try {
+    const response = await axios({
+      method: 'post',
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      headers: {
+        'xi-api-key': elevenLabsApiKey,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/wav'
+      },
+      responseType: 'stream',
+      data: {
+        text: aiMessage,
+        model_id: 'eleven_monolingual_v1',
+        voice_settings: {
+          stability: 0.4,
+          similarity_boost: 0.75
+        },
+        output_format: 'pcm-u-law' // Ensure μ-law 8000 Hz format
+      }
+    });
+
+    const writer = fs.createWriteStream(audioPath);
+    response.data.pipe(writer);
+
+    writer.on('finish', () => {
+      console.log('✅ Audio file saved in μ-law format from ElevenLabs');
+      // Future: stream the audio file contents to Twilio WebSocket
+    });
+
+    writer.on('error', (err) => {
+      console.error('❌ Error saving ElevenLabs audio:', err);
+    });
+
+  } catch (err) {
+    console.error('💥 Error calling ElevenLabs API:', err.message);
+  }
+
   ws.on('message', (data) => {
-    console.log('📥 Received WebSocket message (media chunk)');
-    // In production: Send audio to ElevenLabs or transcription engine here
+    console.log('📥 Media chunk received');
   });
 
   ws.on('close', () => {
@@ -77,7 +117,6 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// Start server
 server.listen(port, () => {
   console.log(`✅ AI Call Server running on port ${port}`);
 });
