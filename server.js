@@ -9,7 +9,7 @@ const app    = express();
 const server = http.createServer(app);
 const port   = process.env.PORT || 10000;
 
-// Twilio & browser CORS + JSON parsing
+// CORS & body parsing
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -26,6 +26,7 @@ app.get('/', (req, res) => {
 // 2) TWIML ENDPOINT
 ////////////////////////////////////////////////////////////////////////////////
 app.all('/twiml', (req, res) => {
+  // Grab from query (REST GET) or body (if someone POSTS TwiML)
   const params = req.method === 'POST' ? req.body : req.query;
   console.log('➡️ [TwiML] got /twiml with', params);
 
@@ -35,22 +36,24 @@ app.all('/twiml', (req, res) => {
     return res.status(400).send('Missing required fields');
   }
 
-  // Build a path-based WebSocket URL so Twilio won’t mangle your querystring
+  // Build a “safe” WS path so we don’t lose the query
   const p = [agent_id, voice_id, contact_name, address]
     .map(encodeURIComponent)
     .join('/');
-  const rawWs = `wss://${req.headers.host}/media/${p}`;
+  const rawWs  = `wss://${req.headers.host}/media/${p}`;
   console.log('🔗 [TwiML] raw WS URL:', rawWs);
 
+  // escape & → &amp; for valid XML
   const xmlSafe = rawWs.replace(/&/g, '&amp;');
-  console.log('🔄 [TwiML] xml-safe WS URL:', xmlSafe);
+  console.log('🔄 [TwiML] xml‐safe WS URL:', xmlSafe);
 
+  // <Connect><Stream> injects into the live call
   const twiml = `
 <Response>
   <Connect>
     <Stream url="${xmlSafe}" />
   </Connect>
-  <Pause length="60" />
+  <Pause length="60"/>
 </Response>`.trim();
 
   console.log('✅ [TwiML] sending TwiML to Twilio');
@@ -63,7 +66,7 @@ app.all('/twiml', (req, res) => {
 ////////////////////////////////////////////////////////////////////////////////
 const wss = new WebSocket.Server({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
-  console.log(`🔌 [Upgrade] incoming: ${req.url}`);
+  console.log('🔌 [Upgrade] incoming:', req.url);
   if (req.url.startsWith('/media/')) {
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   } else {
@@ -72,12 +75,12 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 ////////////////////////////////////////////////////////////////////////////////
-// 4) WEBSOCKET CONNECTION + ElevenLabs
+// 4) WEBSOCKET + ElevenLabs
 ////////////////////////////////////////////////////////////////////////////////
 wss.on('connection', async (ws, req) => {
   console.log('✅ [WebSocket] connected:', req.url);
 
-  // /media/:agent/:voice/:contact/:address
+  // split /media/agent/voice/contact/address
   const parts = req.url.split('/').slice(2).map(decodeURIComponent);
   const [agentId, voiceId, contactName, address] = parts;
   console.log('🔍 [WebSocket] params:', { agentId, voiceId, contactName, address });
@@ -87,28 +90,28 @@ wss.on('connection', async (ws, req) => {
     return ws.close();
   }
 
-  const msg = `Hi ${contactName}, just confirming your appointment at ${address}.`;
-  console.log('✉️  [WebSocket] ElevenLabs text:', msg);
+  const text = `Hi ${contactName}, just confirming your appointment at ${address}.`;
+  console.log('✉️  [WebSocket] ElevenLabs text:', text);
 
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
-    console.error('❌ [WebSocket] missing ELEVENLABS_API_KEY, closing');
+    console.error('❌ [WebSocket] missing ELEVENLABS_API_KEY');
     return ws.close();
   }
 
   try {
     const resp = await axios({
-      method: 'post',
-      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
-      headers: {
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json',
-        'Accept': 'audio/mulaw'
+      method:       'post',
+      url:          `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
+      headers:      {
+        'xi-api-key':    apiKey,
+        'Content-Type':  'application/json',
+        'Accept':        'audio/mulaw'
       },
       responseType: 'stream',
       data: {
-        text: msg,
-        model_id: 'eleven_monolingual_v1',
+        text,
+        model_id:       'eleven_monolingual_v1',
         voice_settings: { stability: 0.4, similarity_boost: 0.75 }
       }
     });
@@ -126,13 +129,13 @@ wss.on('connection', async (ws, req) => {
     ws.close();
   }
 
-  ws.on('message', m => console.log('📥 [WebSocket] got message:', m));
+  ws.on('message', m => console.log('📥 [WebSocket] message', m));
   ws.on('close',   () => console.log('🛑 [WebSocket] closed'));
-  ws.on('error',   e => console.error('💥 [WebSocket]', e.message));
+  ws.on('error',   e => console.error('💥 [WebSocket] error', e.message));
 });
 
 ////////////////////////////////////////////////////////////////////////////////
-// 5) START SERVER
+// 5) START
 ////////////////////////////////////////////////////////////////////////////////
 server.listen(port, () => {
   console.log(`🚀 AI Call Server running on port ${port}`);
