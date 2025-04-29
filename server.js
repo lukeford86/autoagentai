@@ -18,7 +18,7 @@ const resembleApiKey = process.env.RESEMBLE_API_KEY;
 const deepgram = new Deepgram(deepgramApiKey);
 
 // --- Serve dynamic TwiML for Twilio call setup ---
-app.get('/twiml', (req, res) => {
+app.all('/twiml', (req, res) => {
   const agentId = req.query.agent_id;
   const voiceId = req.query.voice_id;
   const contactName = req.query.contact_name;
