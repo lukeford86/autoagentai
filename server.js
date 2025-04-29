@@ -1,89 +1,87 @@
-// src/server.js
-require('dotenv').config();
-
-const http             = require('http');
-const express          = require('express');
-const bodyParser       = require('body-parser');
-const WebSocket        = require('ws');
+// server.js
+const express      = require('express');
+const bodyParser   = require('body-parser');
+const http         = require('http');
+const WebSocket    = require('ws');
 const { VoiceResponse } = require('twilio').twiml;
 
-const app    = express();
-const server = http.createServer(app);
-
-// parse application/x-www-form-urlencoded
+const app = express();
+// parse application/x-www-form-urlencoded (Twilio will POST form data)
 app.use(bodyParser.urlencoded({ extended: false }));
 
-app.get('/', (_req, res) => res.send('OK'));
+// optional healthcheck
+app.get('/', (req, res) => res.send('OK'));
 
+// TwiML endpoint
 app.post('/twiml', (req, res) => {
-  const { agent_id, voice_id, contact_name, address } = req.query;
+  const agent_id     = req.query.agent_id;
+  const voice_id     = req.query.voice_id;
+  const contact_name = req.query.contact_name;
+  const address      = req.query.address;
+
   console.log('[TwiML] Received query params:', { agent_id, voice_id, contact_name, address });
 
   const twiml = new VoiceResponse();
-
-  // 1) Speak the confirmation:
-  twiml.say(`Hi ${contact_name}, just confirming your appointment at ${address}.`);
-
-  // 2) Now open the Media Stream:
-  const connect = twiml.connect();
-  const stream  = connect.stream({ url: `wss://${req.headers.host}/media` });
-  stream.parameter({ name: 'agent_id',     value: agent_id });
-  stream.parameter({ name: 'voice_id',     value: voice_id });
-  stream.parameter({ name: 'contact_name', value: contact_name });
-  stream.parameter({ name: 'address',      value: address });
-
-  // 3) keep the call alive for 30s so we can capture inbound:
-  twiml.pause({ length: 30 });
+  // point Twilio's media Stream to our WS endpoint
+  twiml.connect().stream({
+    url: `${process.env.WS_URL || 'wss://' + req.headers.host}/media` +
+         `?agent_id=${encodeURIComponent(agent_id)}` +
+         `&voice_id=${encodeURIComponent(voice_id)}` +
+         `&contact_name=${encodeURIComponent(contact_name)}` +
+         `&address=${encodeURIComponent(address)}`,
+  });
+  // keep the call alive
+  twiml.pause({ length: 3600 });
 
   res.type('text/xml').send(twiml.toString());
 });
 
+// create server & attach WS
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/media' });
 
-const wss = new WebSocket.Server({ noServer: true });
+wss.on('connection', (twilioWs, req) => {
+  // parse out the customParameters we encoded in the TwiML URL
+  const qs       = req.url.split('?')[1] || '';
+  const params   = new URLSearchParams(qs);
+  const agent_id     = params.get('agent_id');
+  const voice_id     = params.get('voice_id');
+  const contact_name = params.get('contact_name');
+  const address      = params.get('address');
 
-wss.on('connection', (ws) => {
-  console.log('[WebSocket] client connected');
+  console.log('[WS] Twilio stream opened with params:', { agent_id, voice_id, contact_name, address });
 
-  ws.on('message', (data) => {
-    let msg;
-    try { msg = JSON.parse(data); }
-    catch (e) { return console.error('invalid JSON', e); }
+  // connect to your AI-agent websocket
+  const aiUrl = `wss://autoagentai.onrender.com/media` +
+                `?agent_id=${encodeURIComponent(agent_id)}` +
+                `&voice_id=${encodeURIComponent(voice_id)}` +
+                `&contact_name=${encodeURIComponent(contact_name)}` +
+                `&address=${encodeURIComponent(address)}`;
+  const aiWs = new WebSocket(aiUrl);
 
-    switch (msg.event) {
-      case 'connected':
-        console.log('📡 raw event:', msg);
-        break;
-      case 'start':
-        console.log('📡 raw event:', msg);
-        console.log('   • callSid:', msg.start.callSid);
-        console.log('   • parameters:', msg.start.customParameters);
-        break;
-      case 'media':
-        console.log(`📡 got media chunk: ${msg.media.chunk}`);
-        break;
-      default:
-        console.log('📡 unhandled event:', msg.event);
+  aiWs.on('open',    () => console.log('[AI WS] connected'));
+  aiWs.on('message', (msg) => {
+    // relay AI audio frames back into Twilio
+    twilioWs.send(msg);
+  });
+  aiWs.on('close',   () => {
+    console.log('[AI WS] closed');
+    if (twilioWs.readyState === WebSocket.OPEN) twilioWs.close();
+  });
+
+  // relay every Twilio media frame over to the AI service
+  twilioWs.on('message', (data) => {
+    if (aiWs.readyState === WebSocket.OPEN) {
+      aiWs.send(data);
     }
   });
 
-  ws.on('close', (code, reason) => {
-    console.log(`[WebSocket] closed ${code}`, reason);
+  // clean up when caller hangs up
+  twilioWs.on('close', () => {
+    console.log('[WS] Twilio client disconnected');
+    if (aiWs.readyState === WebSocket.OPEN) aiWs.close();
   });
 });
 
-server.on('upgrade', (req, socket, head) => {
-  if (req.url === '/media') {
-    console.log('[Upgrade] incoming WS upgrade to', req.url);
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req);
-    });
-  } else {
-    socket.destroy();
-  }
-});
-
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-  console.log('==> Your service is live 🎉');
-});
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
