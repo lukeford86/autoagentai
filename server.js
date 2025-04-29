@@ -1,9 +1,20 @@
+// Basic Express + Twilio + WebSocket server setup
+
 const express = require('express');
 const { twiml: { VoiceResponse } } = require('twilio');
+const { Deepgram } = require('@deepgram/sdk');
+const http = require('http');
+const WebSocket = require('ws');
+
+// Create Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- Serve dynamic TwiML ---
+// Load Deepgram API key
+const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+const deepgram = new Deepgram(deepgramApiKey);
+
+// --- Serve dynamic TwiML for Twilio outbound call ---
 app.get('/twiml', (req, res) => {
   const agentId = req.query.agent_id;
   const voiceId = req.query.voice_id;
@@ -17,27 +28,56 @@ app.get('/twiml', (req, res) => {
     url: `wss://${req.headers.host}/media?agent_id=${agentId}&voice_id=${voiceId}`,
   });
 
-  // NO intro message — we stay silent until the person speaks
+  // No welcome message — stay silent until user speaks
   res.type('text/xml');
   res.send(response.toString());
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Server is running on port ${PORT}`);
-});
-const http = require('http');
-const WebSocket = require('ws');
-
-// Create a raw HTTP server
+// --- Create HTTP server and attach WebSocket ---
 const server = http.createServer(app);
-
-// Attach WebSocket server to it
 const wss = new WebSocket.Server({ server, path: '/media' });
 
-// Handle WebSocket connections
+// --- Handle WebSocket connections from Twilio ---
 wss.on('connection', (ws, req) => {
   console.log('📞 Twilio Media Stream connected');
 
+  // Pull agent_id and voice_id from the connection URL
+  const params = new URLSearchParams(req.url.split('?')[1]);
+  const agentId = params.get('agent_id');
+  const voiceId = params.get('voice_id');
+
+  console.log(`🎯 Agent ID: ${agentId}, Voice ID: ${voiceId}`);
+
+  // --- Connect to Deepgram for live transcription ---
+  const deepgramSocket = deepgram.transcription.live({
+    language: 'en-AU', // or en-US
+    punctuate: true,
+    interim_results: false,
+    encoding: 'mulaw',    // because Twilio streams mulaw 8000Hz
+    sample_rate: 8000
+  });
+
+  deepgramSocket.on('open', () => {
+    console.log('🔗 Connected to Deepgram Streaming');
+  });
+
+  deepgramSocket.on('transcriptReceived', (data) => {
+    const transcript = data.channel.alternatives[0].transcript;
+    if (transcript && transcript.length > 0) {
+      console.log(`📝 Deepgram transcript: ${transcript}`);
+      // ✅ TODO: Pass to GPT here to generate a reply
+    }
+  });
+
+  deepgramSocket.on('error', (error) => {
+    console.error('Deepgram Error:', error);
+  });
+
+  deepgramSocket.on('close', () => {
+    console.log('🔒 Deepgram WebSocket closed');
+  });
+
+  // --- Handle incoming messages from Twilio WebSocket ---
   ws.on('message', (data) => {
     const message = JSON.parse(data);
 
@@ -46,26 +86,31 @@ wss.on('connection', (ws, req) => {
     }
 
     if (message.event === 'media') {
-      // Incoming audio chunks
-      const audioData = message.media.payload; // base64 audio
+      const audioData = message.media.payload; // base64 encoded audio
+      const buffer = Buffer.from(audioData, 'base64');
 
-      // For now: just log we are receiving audio
-      console.log(`🎙️ Receiving audio data...`);
-      // Later: pipe this audio to Deepgram
+      // Forward raw audio to Deepgram for transcription
+      if (deepgramSocket.readyState === 1) {
+        deepgramSocket.send(buffer);
+      }
     }
 
     if (message.event === 'stop') {
       console.log(`🛑 Call ended for stream SID: ${message.streamSid}`);
       ws.close();
+      deepgramSocket.finish(); // Tell Deepgram the stream is complete
     }
   });
 
   ws.on('close', () => {
-    console.log('🔒 WebSocket connection closed');
+    console.log('🔒 Twilio WebSocket connection closed');
+    if (deepgramSocket.readyState === 1) {
+      deepgramSocket.finish();
+    }
   });
 });
 
-// Change only the *listening* line at the bottom:
+// --- Start the combined server ---
 server.listen(PORT, () => {
-  console.log(`✅ Server listening on port ${PORT}`);
+  console.log(`✅ Server is running on port ${PORT}`);
 });
