@@ -3,8 +3,6 @@ const http = require('http');
 const WebSocket = require('ws');
 const cors = require('cors');
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -27,12 +25,11 @@ app.all('/twiml', (req, res) => {
   }
 
   const wsUrl = `wss://${req.headers.host}/media?agent_id=${agent_id}&voice_id=${voice_id}&contact_name=${contact_name}&address=${address}`;
-  const escapedWsUrl = wsUrl.replace(/&/g, '&amp;');
 
   const twiml = `
     <Response>
       <Start>
-        <Stream url="${escapedWsUrl}" />
+        <Stream url="${wsUrl}" />
       </Start>
     </Response>
   `;
@@ -62,20 +59,19 @@ wss.on('connection', async (ws, req) => {
   const contactName = urlParams.get('contact_name');
   const address = urlParams.get('address');
 
-  console.log(`🎤 WebSocket connected for ${contactName} @ ${address}`);
+  console.log(`✅ WebSocket connected: ${contactName} @ ${address}`);
 
   const aiMessage = `Hi ${contactName}, just confirming your appointment at ${address}.`;
   const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY;
-  const audioPath = path.join(__dirname, 'output.wav');
 
   try {
     const response = await axios({
       method: 'post',
-      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
       headers: {
         'xi-api-key': elevenLabsApiKey,
         'Content-Type': 'application/json',
-        'Accept': 'audio/wav'
+        'Accept': 'audio/mulaw'
       },
       responseType: 'stream',
       data: {
@@ -84,25 +80,22 @@ wss.on('connection', async (ws, req) => {
         voice_settings: {
           stability: 0.4,
           similarity_boost: 0.75
-        },
-        output_format: 'pcm-u-law' // Ensure μ-law 8000 Hz format
+        }
       }
     });
 
-    const writer = fs.createWriteStream(audioPath);
-    response.data.pipe(writer);
-
-    writer.on('finish', () => {
-      console.log('✅ Audio file saved in μ-law format from ElevenLabs');
-      // Future: stream the audio file contents to Twilio WebSocket
+    response.data.on('data', (chunk) => {
+      ws.send(chunk);
     });
 
-    writer.on('error', (err) => {
-      console.error('❌ Error saving ElevenLabs audio:', err);
+    response.data.on('end', () => {
+      console.log('✅ Finished streaming audio');
+      ws.close();
     });
 
   } catch (err) {
-    console.error('💥 Error calling ElevenLabs API:', err.message);
+    console.error('💥 Error streaming from ElevenLabs:', err.message);
+    ws.close();
   }
 
   ws.on('message', (data) => {
