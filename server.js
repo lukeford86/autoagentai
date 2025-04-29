@@ -17,14 +17,18 @@ const resembleApiKey = process.env.RESEMBLE_API_KEY;
 // Setup Deepgram
 const deepgram = new Deepgram(deepgramApiKey);
 
-// --- Serve dynamic TwiML for Twilio call setup ---
+// --- Serve TwiML ---
 app.all('/twiml', (req, res) => {
-  const agentId = req.query.agent_id;
-  const voiceId = req.query.voice_id;
-  const contactName = req.query.contact_name;
-  const address = req.query.address;
+  console.log('✅ [TwiML] /twiml hit');
+
+  const params = req.method === 'GET' ? req.query : req.body;
+  const agentId = params.agent_id;
+  const voiceId = params.voice_id;
+  const contactName = params.contact_name;
+  const address = params.address;
 
   if (!agentId || !voiceId || !contactName || !address) {
+    console.error('❌ [TwiML] Missing fields:', { agentId, voiceId, contactName, address });
     return res.status(400).send('Missing required fields');
   }
 
@@ -41,9 +45,9 @@ app.all('/twiml', (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/media' });
 
-// --- WebSocket Connection Handler ---
+// --- WebSocket Connection ---
 wss.on('connection', (ws, req) => {
-  console.log('📞 Twilio Media Stream connected');
+  console.log('📞 [Twilio] WebSocket connection established');
 
   const params = new URLSearchParams(req.url.split('?')[1]);
   const agentId = params.get('agent_id');
@@ -51,9 +55,8 @@ wss.on('connection', (ws, req) => {
   const contactName = params.get('contact_name');
   const address = params.get('address');
 
-  console.log(`🎯 Connected for Contact: ${contactName}, Address: ${address}`);
+  console.log(`🎯 [Twilio] Params Received:`, { agentId, voiceId, contactName, address });
 
-  // Connect to Deepgram Streaming API
   const deepgramSocket = deepgram.transcription.live({
     language: 'en-AU',
     punctuate: true,
@@ -63,85 +66,60 @@ wss.on('connection', (ws, req) => {
   });
 
   deepgramSocket.on('open', () => {
-    console.log('🔗 Connected to Deepgram');
-  });
-
-  deepgramSocket.on('transcriptReceived', async (data) => {
-    const transcript = data.channel.alternatives[0].transcript;
-    if (transcript && transcript.length > 0) {
-      console.log(`📝 Deepgram Transcript: ${transcript}`);
-
-      try {
-        const gptReply = await generateReplyFromGPT(transcript, contactName, address);
-        const voiceStream = await streamVoiceFromResemble(gptReply, voiceId);
-
-        // Send Resemble audio stream back to Twilio
-        voiceStream.on('data', (chunk) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            const payload = Buffer.from(chunk).toString('base64');
-            const message = JSON.stringify({
-              event: 'media',
-              media: {
-                payload: payload
-              }
-            });
-            ws.send(message);
-          }
-        });
-
-        voiceStream.on('end', () => {
-          console.log('✅ Finished streaming GPT reply back to Twilio');
-        });
-
-      } catch (error) {
-        console.error('❌ Error in AI processing:', error);
-      }
-    }
+    console.log('🔗 [Deepgram] Connected successfully');
   });
 
   deepgramSocket.on('error', (error) => {
-    console.error('Deepgram Socket Error:', error);
+    console.error('❌ [Deepgram] Connection Error:', error);
   });
 
   deepgramSocket.on('close', () => {
-    console.log('🔒 Deepgram WebSocket closed');
+    console.log('🔒 [Deepgram] Socket closed');
   });
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     const message = JSON.parse(data);
 
+    console.log('📥 [Twilio] Message Event:', message.event);
+
     if (message.event === 'start') {
-      console.log(`✅ Call started: ${message.streamSid}`);
+      console.log(`✅ [Twilio] Call Started: ${message.streamSid}`);
     }
 
     if (message.event === 'media') {
+      console.log('🎤 [Twilio] Media Packet Received');
       const audioData = message.media.payload;
       const buffer = Buffer.from(audioData, 'base64');
 
       if (deepgramSocket.readyState === 1) {
         deepgramSocket.send(buffer);
+      } else {
+        console.warn('⚠️ [Deepgram] Not ready to receive audio');
       }
     }
 
     if (message.event === 'stop') {
-      console.log(`🛑 Call ended: ${message.streamSid}`);
+      console.log(`🛑 [Twilio] Call Stopped: ${message.streamSid}`);
       ws.close();
       deepgramSocket.finish();
     }
   });
 
   ws.on('close', () => {
-    console.log('🔒 Twilio WebSocket connection closed');
+    console.log('🔒 [Twilio] WebSocket closed');
     if (deepgramSocket.readyState === 1) {
       deepgramSocket.finish();
     }
   });
+
+  ws.on('error', (error) => {
+    console.error('❌ [Twilio] WebSocket Error:', error);
+  });
 });
 
-// --- Functions ---
-
+// --- GPT Reply Function ---
 async function generateReplyFromGPT(userText, contactName, address) {
-  const systemPrompt = `You are a friendly real estate agent AI assistant. You are calling ${contactName} about their property at ${address}. Offer a free property valuation, mention there have been some recent sales nearby, and suggest booking a time for a free property price update. Be natural, confident, and not pushy.`;
+  const systemPrompt = `You are a friendly real estate agent AI assistant. You are calling ${contactName} about their property at ${address}. Offer a free property valuation, mention recent sales nearby, and book a time for a free update. Be natural, professional, and confident.`;
 
   const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
     model: 'gpt-4o',
@@ -157,28 +135,8 @@ async function generateReplyFromGPT(userText, contactName, address) {
   });
 
   const reply = response.data.choices[0].message.content;
-  console.log(`🤖 GPT Reply: ${reply}`);
+  console.log(`🤖 [GPT Reply]: ${reply}`);
   return reply;
-}
-
-async function streamVoiceFromResemble(replyText, voiceId) {
-  const response = await axios({
-    method: 'POST',
-    url: `https://app.resemble.ai/api/v2/projects/${voiceId}/clips/stream`,
-    headers: {
-      Authorization: `Token token=${resembleApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    data: {
-      text: replyText,
-      voice: voiceId,
-      output_format: 'mulaw',
-      sample_rate: 8000
-    },
-    responseType: 'stream'
-  });
-
-  return response.data;
 }
 
 // --- Start Server ---
