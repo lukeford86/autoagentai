@@ -1,53 +1,69 @@
 const express = require('express');
-const { VoiceResponse } = require('twilio').twiml;
 const http = require('http');
-const WebSocket = require('ws');
-
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const { Server: WebSocketServer } = require('ws');
+const { VoiceResponse } = require('twilio').twiml;
+const url = require('url');
 
 const PORT = process.env.PORT || 10000;
 
-// === TwiML to initiate streaming ===
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ noServer: true });
+
+// --- TwiML endpoint ---
 app.all('/twiml', (req, res) => {
   console.log('✅ [HTTP] /twiml HIT');
-  
+
   const { agent_id, voice_id, contact_name, address } = req.query;
 
   if (!agent_id || !voice_id || !contact_name || !address) {
-    return res.status(400).send('Missing required fields: agent_id, voice_id, contact_name, address');
+    console.error('❌ Missing required query parameters');
+    return res.status(400).send('Missing required fields');
   }
 
   const response = new VoiceResponse();
   response.start().stream({
-    url: `wss://${req.headers.host}/media?agent_id=${agent_id}&voice_id=${voice_id}&contact_name=${contact_name}&address=${address}`
+    url: `wss://${req.headers.host}/media?agent_id=${encodeURIComponent(agent_id)}&voice_id=${encodeURIComponent(voice_id)}&contact_name=${encodeURIComponent(contact_name)}&address=${encodeURIComponent(address)}`
   });
 
   res.type('text/xml');
   res.send(response.toString());
 });
 
-// === Handle incoming WebSocket connection ===
-wss.on('connection', (ws, req) => {
-  console.log('✅ [WebSocket] Media stream connected');
+// --- WebSocket Upgrade Handler ---
+server.on('upgrade', (request, socket, head) => {
+  const pathname = url.parse(request.url).pathname;
+
+  if (pathname === '/media') {
+    console.log('✅ [UPGRADE] WebSocket upgrade to /media');
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    console.warn('⚠️ [UPGRADE] Unknown path', pathname);
+    socket.destroy();
+  }
+});
+
+// --- WebSocket Connection Handler ---
+wss.on('connection', (ws, request) => {
+  console.log('✅ [WebSocket] Connection established');
 
   ws.on('message', (message) => {
-    console.log('📥 [WebSocket] Received media packet:', message.length, 'bytes');
-    // Later you can add audio processing here
+    console.log('📥 [WebSocket] Message received', message.length, 'bytes');
+    // This is where incoming audio/media can be handled later
   });
 
   ws.on('close', () => {
-    console.log('❌ [WebSocket] Media stream closed');
+    console.log('❌ [WebSocket] Connection closed');
   });
 
-  ws.on('error', (err) => {
-    console.error('⚠️ [WebSocket] Error:', err);
+  ws.on('error', (error) => {
+    console.error('❌ [WebSocket] Error', error);
   });
 });
 
-// === Start server ===
+// --- Start Server ---
 server.listen(PORT, () => {
   console.log(`✅ AI Call Server running on port ${PORT}`);
-  console.log('🎉 Your service is live');
 });
