@@ -9,26 +9,22 @@ const app    = express();
 const server = http.createServer(app);
 const port   = process.env.PORT || 10000;
 
-// Enable CORS + body-parsing (just in case)
+// 1) middleware
 app.use(cors());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true })); // parse Twilio POST bodies
 app.use(express.json());
 
-////////////////////////////////////////////////////////////////////////////////
-// 1) HEALTH CHECK
-////////////////////////////////////////////////////////////////////////////////
+// 2) health check
 app.get('/', (req, res) => {
   console.log('🔍 [Health] GET / → OK');
   res.send('✅ AI Call Server is live');
 });
 
-////////////////////////////////////////////////////////////////////////////////
-// 2) TWIML ENDPOINT
-////////////////////////////////////////////////////////////////////////////////
+// 3) TwiML endpoint
 app.all('/twiml', (req, res) => {
-  // Twilio will GET this URL
-  const params = req.method === 'POST' ? req.body : req.query;
-  console.log('➡️ [TwiML] Received /twiml request:', params);
+  // merge query + body so we grab agent_id whether Twilio POSTS or GETs
+  const params = { ...req.query, ...req.body };
+  console.log('➡️ [TwiML] got /twiml with', params);
 
   const { agent_id, voice_id, contact_name, address } = params;
   if (!agent_id || !voice_id || !contact_name || !address) {
@@ -36,64 +32,54 @@ app.all('/twiml', (req, res) => {
     return res.status(400).send('Missing required fields');
   }
 
-  // Build a plain WS URL
-  const rawWsUrl = `wss://${req.headers.host}/media?` +
+  // build and escape your WebSocket URL
+  const rawWs = `wss://${req.headers.host}/media?` +
     `agent_id=${encodeURIComponent(agent_id)}` +
     `&voice_id=${encodeURIComponent(voice_id)}` +
     `&contact_name=${encodeURIComponent(contact_name)}` +
     `&address=${encodeURIComponent(address)}`;
-  console.log('🔗 [TwiML] raw WS URL:', rawWsUrl);
+  console.log('🔗 [TwiML] raw WS URL:', rawWs);
 
-  // Escape ampersands for valid XML
-  const xmlSafeWs = rawWsUrl.replace(/&/g, '&amp;');
+  const xmlSafeWs = rawWs.replace(/&/g, '&amp;');
   console.log('🔄 [TwiML] xml-safe WS URL:', xmlSafeWs);
 
-  // Use <Connect><Stream> to send audio back INTO the call
+  // <-- use Connect to send audio *into* the call -->
   const twiml = `
 <Response>
   <Connect>
     <Stream url="${xmlSafeWs}" />
   </Connect>
-  <!-- Pause in case agent hangs up, etc -->
   <Pause length="60"/>
 </Response>`.trim();
 
-  console.log('✅ [TwiML] Sending TwiML to Twilio');
+  console.log('✅ [TwiML] sending TwiML to Twilio');
   res.set('Content-Type', 'text/xml');
   res.send(twiml);
 });
 
-////////////////////////////////////////////////////////////////////////////////
-// 3) WEBSOCKET UPGRADE HANDLING
-////////////////////////////////////////////////////////////////////////////////
+// 4) WebSocket upgrade
 const wss = new WebSocket.Server({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
-  console.log('🔌 [Upgrade] incoming request:', req.url);
+  console.log('🔌 [Upgrade] incoming:', req.url);
   if (req.url.startsWith('/media')) {
-    wss.handleUpgrade(req, socket, head, ws =>
-      wss.emit('connection', ws, req)
-    );
+    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   } else {
     socket.destroy();
   }
 });
 
-////////////////////////////////////////////////////////////////////////////////
-// 4) WEBSOCKET CONNECTION → ElevenLabs STREAM
-////////////////////////////////////////////////////////////////////////////////
+// 5) WebSocket logic → ElevenLabs
 wss.on('connection', async (ws, req) => {
-  console.log('✅ [WebSocket] Connection established:', req.url);
-
-  // Parse query string out of req.url
-  const query = new URLSearchParams(req.url.split('?')[1]);
-  const agentId     = query.get('agent_id');
-  const voiceId     = query.get('voice_id');
-  const contactName = query.get('contact_name');
-  const address     = query.get('address');
+  console.log('✅ [WebSocket] connected:', req.url);
+  const qp = new URLSearchParams(req.url.split('?')[1]);
+  const agentId     = qp.get('agent_id');
+  const voiceId     = qp.get('voice_id');
+  const contactName = qp.get('contact_name');
+  const address     = qp.get('address');
   console.log('🔍 [WebSocket] params:', { agentId, voiceId, contactName, address });
 
   if (!agentId || !voiceId || !contactName || !address) {
-    console.error('❌ [WebSocket] missing parameters → closing');
+    console.error('❌ [WebSocket] missing params → closing');
     return ws.close();
   }
 
@@ -124,11 +110,11 @@ wss.on('connection', async (ws, req) => {
     });
 
     resp.data.on('data', chunk => {
-      console.log(`📦 [WebSocket] Streaming ${chunk.length} bytes to Twilio`);
+      console.log(`📦 [WebSocket] sending ${chunk.length} bytes`);
       ws.send(chunk);
     });
     resp.data.on('end', () => {
-      console.log('✅ [WebSocket] ElevenLabs stream ended');
+      console.log('✅ [WebSocket] stream ended');
       ws.close();
     });
   } catch (err) {
@@ -136,14 +122,12 @@ wss.on('connection', async (ws, req) => {
     ws.close();
   }
 
-  ws.on('message', m => console.log('📥 [WebSocket] Client message:', m));
-  ws.on('close',   () => console.log('🛑 [WebSocket] Connection closed'));
-  ws.on('error',   e => console.error('💥 [WebSocket] error:', e.message));
+  ws.on('message', msg  => console.log('📥 [WebSocket] message:', msg));
+  ws.on('close',       ()   => console.log('🛑 [WebSocket] closed'));
+  ws.on('error',       e    => console.error('💥 [WebSocket] error:', e.message));
 });
 
-////////////////////////////////////////////////////////////////////////////////
-// 5) START SERVER
-////////////////////////////////////////////////////////////////////////////////
+// 6) listen
 server.listen(port, () => {
   console.log(`🚀 AI Call Server running on port ${port}`);
 });
