@@ -10,7 +10,7 @@ const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 10000;
 
 // === TwiML to initiate streaming ===
-app.get('/twiml', (req, res) => {
+app.all('/twiml', (req, res) => {
   console.log('✅ [HTTP] /twiml HIT');
   
   const { agent_id, voice_id, contact_name, address } = req.query;
@@ -34,7 +34,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (message) => {
     console.log('📥 [WebSocket] Received media packet:', message.length, 'bytes');
-    // Here later you can handle live audio bytes if needed
+    // Later you can add audio processing here
   });
 
   ws.on('close', () => {
