@@ -1,31 +1,34 @@
 // server.js
 const express = require('express');
+const http = require('http');
+const { Server: WebSocketServer } = require('ws');
 const { twiml: { VoiceResponse } } = require('twilio');
+const url = require('url');
 const { Deepgram } = require('@deepgram/sdk');
 const axios = require('axios');
-const http = require('http');
-const WebSocket = require('ws');
-const url = require('url');
 
 // Environment Variables
 const PORT = process.env.PORT || 3000;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-// Create Express App
+// Initialize
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ noServer: true });
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- TwiML Route ---
+// --- Webhook Route for TwiML
 app.all('/twiml', (req, res) => {
   console.log('✅ [HTTP] /twiml HIT');
 
   const { agent_id, voice_id, contact_name, address } = req.query;
 
   if (!agent_id || !voice_id || !contact_name || !address) {
-    console.error('❌ [TwiML] Missing required fields', { agent_id, voice_id, contact_name, address });
+    console.error('❌ [TwiML] Missing required fields');
     return res.status(400).send('Missing required fields (agent_id, voice_id, contact_name, address)');
   }
 
@@ -38,30 +41,24 @@ app.all('/twiml', (req, res) => {
   res.send(response.toString());
 });
 
-// --- Create HTTP server ---
-const server = http.createServer(app);
-
-// --- WebSocket Server ---
-const wss = new WebSocket.Server({ noServer: true });
-
-// --- WebSocket Upgrade Handling ---
+// --- Handle WebSocket Upgrades
 server.on('upgrade', (request, socket, head) => {
   const pathname = url.parse(request.url).pathname;
-  console.log('📡 [Upgrade Request]', pathname);
 
   if (pathname === '/media') {
+    console.log('🔗 [UPGRADE] WebSocket Upgrade Request received');
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
   } else {
-    console.warn('❌ [Upgrade] Unknown path, destroying socket:', pathname);
+    console.warn('❌ [UPGRADE] Unknown path, destroying socket');
     socket.destroy();
   }
 });
 
-// --- WebSocket Connection Handling ---
+// --- WebSocket Connection Handling
 wss.on('connection', (ws, request) => {
-  console.log('🔗 [WebSocket] Connection established ✅');
+  console.log('🛰️ [WebSocket] Connection established ✅');
 
   const params = new URLSearchParams(request.url.split('?')[1]);
   const agentId = params.get('agent_id');
@@ -69,10 +66,10 @@ wss.on('connection', (ws, request) => {
   const contactName = params.get('contact_name');
   const address = params.get('address');
 
-  console.log('🎯 [Session Details]', { agentId, voiceId, contactName, address });
+  console.log('🎯 [Session]', { agentId, voiceId, contactName, address });
 
   const deepgram = new Deepgram(DEEPGRAM_API_KEY);
-  const deepgramSocket = deepgram.transcription.live({
+  const dgSocket = deepgram.transcription.live({
     language: 'en-AU',
     punctuate: true,
     interim_results: false,
@@ -80,48 +77,53 @@ wss.on('connection', (ws, request) => {
     sample_rate: 8000,
   });
 
-  // Deepgram event listeners
-  deepgramSocket.on('open', () => console.log('🛰️ [Deepgram] Connected'));
-  deepgramSocket.on('error', (err) => console.error('❌ [Deepgram Error]', err));
-  deepgramSocket.on('close', () => console.log('🔒 [Deepgram] Connection closed'));
+  let fullTranscript = '';
 
-  ws.on('error', (error) => console.error('❌ [WebSocket Error]', error));
+  dgSocket.on('open', () => console.log('🔊 [Deepgram] Connected'));
+  dgSocket.on('error', (err) => console.error('❌ [Deepgram Error]', err));
+  dgSocket.on('close', () => console.log('🔒 [Deepgram] Closed'));
+
   ws.on('close', () => {
-    console.log('🔒 [WebSocket] Connection closed');
-    deepgramSocket.finish();
+    console.log('🔒 [WebSocket] Closed by client');
+    dgSocket.finish();
   });
 
-  // Handle incoming messages
+  ws.on('error', (err) => {
+    console.error('❌ [WebSocket Error]', err);
+    dgSocket.finish();
+  });
+
   ws.on('message', async (message) => {
     try {
       const msg = JSON.parse(message);
 
       if (msg.event === 'start') {
-        console.log('▶️ [Twilio] Call started - StreamSid:', msg.streamSid);
+        console.log('▶️ [Twilio] Call started');
       }
 
       if (msg.event === 'media') {
         const audio = Buffer.from(msg.media.payload, 'base64');
-        if (deepgramSocket.readyState === 1) {
-          deepgramSocket.send(audio);
+        if (dgSocket.readyState === 1) {
+          dgSocket.send(audio);
         }
       }
 
       if (msg.event === 'stop') {
-        console.log('🛑 [Twilio] Call stopped - StreamSid:', msg.streamSid);
+        console.log('🛑 [Twilio] Call stopped');
         ws.close();
       }
-    } catch (err) {
-      console.error('❌ [WebSocket Message Handling Error]', err);
+    } catch (error) {
+      console.error('❌ [Message Handling Error]', error);
     }
   });
 
-  // Deepgram Transcript received
-  deepgramSocket.on('transcriptReceived', async (data) => {
+  // Handle Deepgram transcripts
+  dgSocket.on('transcriptReceived', async (data) => {
     try {
       const transcript = data.channel.alternatives[0]?.transcript;
       if (transcript && transcript.length > 0) {
         console.log('📝 [Transcript]', transcript);
+        fullTranscript += transcript + ' ';
 
         const gptReply = await generateReply(transcript, contactName, address);
         const audioStream = await streamFromElevenLabs(gptReply, voiceId);
@@ -134,28 +136,28 @@ wss.on('connection', (ws, request) => {
         });
 
         audioStream.on('end', () => {
-          console.log('✅ [ElevenLabs] Voice streaming completed');
+          console.log('✅ [ElevenLabs] Finished sending audio');
         });
       }
-    } catch (err) {
-      console.error('❌ [Transcript Handling Error]', err);
+    } catch (error) {
+      console.error('❌ [Transcript Handling Error]', error);
     }
   });
 });
 
-// --- GPT-4 Reply Generation ---
+// --- Generate AI Reply using OpenRouter (GPT-4o)
 async function generateReply(userText, contactName, address) {
-  const systemPrompt = `You are a friendly real estate agent assistant. You are calling ${contactName} about their property at ${address}. Offer a free valuation and politely ask if they are considering selling.`;
-  
+  const systemPrompt = `You are a friendly real estate agent calling ${contactName} about their property at ${address}. Politely ask if they are considering selling.`;
+
   const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userText }
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userText }
     ]
   }, {
     headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json'
     }
   });
@@ -165,14 +167,14 @@ async function generateReply(userText, contactName, address) {
   return reply;
 }
 
-// --- ElevenLabs Stream Voice ---
+// --- Stream AI Voice back via ElevenLabs
 async function streamFromElevenLabs(text, voiceId) {
   const response = await axios({
     method: 'POST',
     url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
     headers: {
       'xi-api-key': ELEVENLABS_API_KEY,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
     },
     data: {
       text,
@@ -182,13 +184,13 @@ async function streamFromElevenLabs(text, voiceId) {
         similarity_boost: 0.75,
       }
     },
-    responseType: 'stream'
+    responseType: 'stream',
   });
 
   return response.data;
 }
 
-// --- Start the server ---
+// --- Start server
 server.listen(PORT, () => {
   console.log(`✅ AI Call Server running on port ${PORT}`);
 });
