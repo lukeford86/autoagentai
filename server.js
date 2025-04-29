@@ -1,183 +1,131 @@
 // server.js
-require('dotenv').config();
+require("dotenv").config();
 
-const express       = require('express');
-const bodyParser    = require('body-parser');
-const http          = require('http');
-const WebSocket     = require('ws');
-const { Deepgram }  = require('@deepgram/sdk');
-const ElevenLabsAPI = require('elevenlabs');
-const { OpenAI }    = require('openai');
-const VoiceResponse = require('twilio').twiml.VoiceResponse;
+const express        = require("express");
+const bodyParser     = require("body-parser");
+const { twiml: { VoiceResponse } } = require("twilio");
+const { Deepgram }   = require("@deepgram/sdk");
+const { OpenAI }     = require("openai");
+const WebSocket      = require("ws");
 
-//
-// —– Configuration
-//
-const DEEPGRAM_API_KEY   = process.env.DEEPGRAM_API_KEY;
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
-const PORT = process.env.PORT || 10000;
-
-const deepgram    = new Deepgram(DEEPGRAM_API_KEY);
-const elevenlabs  = new ElevenLabsAPI({ apiKey: ELEVENLABS_API_KEY });
-const openai      = new OpenAI({
-  apiKey: OPENROUTER_API_KEY,
-  baseURL: 'https://openrouter.ai/api/v1'
+// —— ElevenLabs import fix ——
+const elevenModule  = require("elevenlabs");
+const ElevenLabsAPI = elevenModule.default || elevenModule;
+const eleven        = new ElevenLabsAPI({
+  apiKey: process.env.ELEVENLABS_API_KEY,
 });
 
-//
-// —– Express + TwiML endpoint
-//
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-app.get('/', (_, res) => res.send('OK'));
+const PORT = process.env.PORT || 10000;
 
-app.post('/twiml', (req, res) => {
-  // Twilio will GET/POST here with your four query params
+// 1) TwiML webhook to hand off to Media Streams
+app.post("/twiml", (req, res) => {
   const { agent_id, voice_id, contact_name, address } = req.query;
-  console.log('[TwiML] Received query params:', { agent_id, voice_id, contact_name, address });
+  console.log("[TwiML] Received query params:", { agent_id, voice_id, contact_name, address });
 
-  // Build TwiML <Connect><Stream>
-  const twiml = new VoiceResponse();
-  const connect = twiml.connect();
-  const url = `${req.protocol === 'https' ? 'wss' : 'ws'}://${req.get('host')}/media`
-              + `?agent_id=${encodeURIComponent(agent_id)}`
-              + `&voice_id=${encodeURIComponent(voice_id)}`
-              + `&contact_name=${encodeURIComponent(contact_name)}`
-              + `&address=${encodeURIComponent(address)}`;
+  const vr = new VoiceResponse();
+  const connect = vr.connect();
+  connect.stream({
+    url: `wss://${req.headers.host}/media`,
+    track: "inbound",
+    parameters: { agent_id, voice_id, contact_name, address }
+  });
 
-  connect.stream({ url })
-    .parameter({ name: 'agent_id',     value: agent_id     })
-    .parameter({ name: 'voice_id',     value: voice_id     })
-    .parameter({ name: 'contact_name', value: contact_name })
-    .parameter({ name: 'address',      value: address      });
-
-  res.type('text/xml').send(twiml.toString());
+  res.type("text/xml").send(vr.toString());
 });
 
-//
-// —– HTTP + WebSocket server
-//
-const server = http.createServer(app);
-const wss    = new WebSocket.Server({ noServer: true });
-
-server.on('upgrade', (req, socket, head) => {
-  if (req.url.startsWith('/media')) {
-    wss.handleUpgrade(req, socket, head, ws => {
-      wss.emit('connection', ws, req);
-    });
-  } else {
-    socket.destroy();
-  }
+// 2) Spin up HTTP + WS server
+const server = app.listen(PORT, () => {
+  console.log(`✅ Server listening on port ${PORT}`);
 });
+const wss = new WebSocket.Server({ server, path: "/media" });
 
-wss.on('connection', (ws, req) => {
-  // parse out our custom params again from the WebSocket URL
-  const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
-  const agent_id     = params.get('agent_id');
-  const voice_id     = params.get('voice_id');
-  const contact_name = params.get('contact_name');
-  const address      = params.get('address');
+// 3) Clients for Deepgram & OpenAI
+const deepgram = new Deepgram(process.env.DEEPGRAM_API_KEY);
+const openai   = new OpenAI({ apiKey: process.env.OPENROUTER_API_KEY });
 
-  console.log('[WS] New Twilio stream, awaiting <Start>…');
+wss.on("connection", (ws) => {
+  console.log("[WS] Twilio stream opened, waiting for start event…");
 
-  let dgSocket, aiSocket;
-  let transcriptBuffer = '';
+  // Buffer to hold the Twilio-sent customParameters
+  let params = {};
 
-  ws.on('message', async raw => {
-    const msg = JSON.parse(raw);
+  // Kick off a live Deepgram transcription socket
+  const dgSocket = deepgram.transcription.live({
+    encoding:    "mulaw",
+    sampleRate:  8000,
+    channels:    1,
+    interimResults: true
+  });
+  dgSocket.open();
 
-    // —– CALL STARTED
-    if (msg.event === 'start') {
-      console.log('[WS] <Start> customParameters:', msg.start.customParameters);
+  dgSocket.addListener("open", () => {
+    console.log("[Deepgram] transcription socket open");
+  });
 
-      // 1) Deepgram live transcription socket
-      dgSocket = deepgram.transcription.live({
-        punctuate:      true,
-        interim_results:false,
-        encoding:       msg.start.mediaFormat.encoding,
-        sample_rate:    msg.start.mediaFormat.sampleRate
+  // When Deepgram returns results…
+  dgSocket.addListener("transcriptReceived", async (trans) => {
+    const text = trans.channel.alternatives[0].transcript.trim();
+    console.log("[Deepgram]", trans.isFinal ? "final →" : "interim →", text);
+
+    if (trans.isFinal && text) {
+      // 4) Send the user’s words to OpenAI (via OpenRouter)
+      const aiRes = await openai.chat.completions.create({
+        model:    "gpt-4o-mini",
+        messages: [
+          {
+            role:    "system",
+            content: "You are an appointment reminder agent."
+          },
+          {
+            role:    "user",
+            content: `Customer said: "${text}". Respond appropriately.`
+          }
+        ]
       });
+      const reply = aiRes.choices[0].message.content.trim();
+      console.log("[AI reply]", reply);
 
-      dgSocket.addListener('transcriptReceived', data => {
-        const text = data.channel.alternatives[0].transcript;
-        console.log('[Deepgram]', text);
-        // forward to AI once we have a non-empty transcript
-        if (text.trim() && aiSocket && aiSocket.readyState === WebSocket.OPEN) {
-          aiSocket.send(JSON.stringify({ role: 'user', content: text }));
-        }
+      // 5) Text-to-speech via ElevenLabs
+      const audioBuffer = await eleven.textToSpeech({
+        text:  reply,
+        voice: params.voice_id
       });
+      console.log("[TTS] audio byte length:", audioBuffer.length);
 
-      // 2) OpenRouter chat WebSocket
-      aiSocket = new WebSocket('wss://openrouter.ai/v1/chat', {
-        headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}` }
-      });
-
-      aiSocket.on('open', () => {
-        console.log('[AI WS] connected');
-        // prime the conversation if you like:
-        aiSocket.send(JSON.stringify({
-          role: 'system',
-          content: `You are an appointment reminder agent. Contact: ${contact_name}, Address: ${address}.`
-        }));
-      });
-
-      aiSocket.on('message', async chunk => {
-        const payload = JSON.parse(chunk);
-        // accumulate content deltas
-        if (payload.choices?.[0]?.delta?.content) {
-          transcriptBuffer += payload.choices[0].delta.content;
-        }
-        // on end of response
-        if (payload.choices?.[0]?.finish_reason) {
-          console.log('[AI]', transcriptBuffer);
-
-          // 3) ElevenLabs TTS
-          const audioBuffer = await elevenlabs.textToSpeech({
-            voice: voice_id,
-            model: 'eleven_monolingual_v1',
-            input: transcriptBuffer
-          });
-
-          // send back into Twilio media stream
-          ws.send(JSON.stringify({
-            event: 'media',
-            media: { payload: audioBuffer.toString('base64') }
-          }));
-
-          transcriptBuffer = '';
-        }
-      });
-
-      aiSocket.on('close', () => console.log('[AI WS] closed'));
-
-      // finally hook Twilio media → Deepgram
-      dgSocket.addListener('open', () => console.log('[Deepgram WS] open'));
-      dgSocket.addListener('close', ()=> console.log('[Deepgram WS] closed'));
-    }
-
-    // —– MEDIA CHUNK
-    else if (msg.event === 'media') {
-      const audio = Buffer.from(msg.media.payload, 'base64');
-      if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
-        dgSocket.send(audio);
-      }
-    }
-
-    // —– CALL ENDED
-    else if (msg.event === 'stop') {
-      console.log('[WS] <Stop>');
-      if (dgSocket)   dgSocket.finish();
-      if (aiSocket)   aiSocket.close();
-      ws.close();
+      // 6) Push that audio back to Twilio via REST <Play>
+      //    (You could also stream it back over MediaStream, but easiest is REST)
+      const twilioClient = require("twilio")(
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_AUTH_TOKEN
+      );
+      await twilioClient.calls(params.callSid)
+        .update({
+          twiml: `<Response><Play>data:audio/wav;base64,${audioBuffer.toString("base64")}</Play></Response>`
+        });
     }
   });
 
-  ws.on('close', () => console.log('[WS] Twilio disconnected'));
-});
+  ws.on("message", (data) => {
+    const msg = JSON.parse(data.toString());
 
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+    if (msg.event === "start") {
+      // grabs our customParameters into a local var
+      params = msg.start.customParameters;
+      console.log("[WS start] customParameters:", params);
+    }
+    else if (msg.event === "media") {
+      // Twilio streaming us raw PCM; feed it to Deepgram
+      const pcm = Buffer.from(msg.media.payload, "base64");
+      dgSocket.send(pcm);
+      console.log("📡 got media chunk:", msg.media.chunk);
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("[WS] Twilio disconnected");
+    dgSocket.finish();       // close Deepgram
+  });
 });
