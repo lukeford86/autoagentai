@@ -9,7 +9,6 @@ const app    = express();
 const server = http.createServer(app);
 const port   = process.env.PORT || 10000;
 
-// parse form bodies so Twilio’s POST to /twiml can be inspected
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -20,50 +19,44 @@ app.get('/', (req, res) => {
   res.send('✅ AI Call Server is live');
 });
 
-// 2) TwiML generator
+// 2) TwiML generator: <Connect><Stream> + <Parameter>
 app.all('/twiml', (req, res) => {
-  // Twilio will POST you all of its call params here (Called, From, CallSid, etc)
-  // BUT *your* custom fields came in on the query string of the URL you passed
-  // when you created the outbound call:
-  //    Url=https://…/twiml?agent_id=…&voice_id=…&contact_name=…&address=…
-  //
-  // We don’t actually need those query params in our Node code, we’ll bake them
-  // into the Media Stream itself via <Parameter> below.
   console.log('➡️ [TwiML] got /twiml with', req.body);
 
-  // pull nothing out of req.body other than sanity‐checking…
-  // you could check req.body.CallSid etc if you want
-  // for now assume it’s always valid.
-  //
-  // Build your WebSocket base URL (no querystring!)
-  const wsUrl = `wss://${req.headers.host}/media`;
+  const wsBase = `wss://${req.headers.host}/media`;
+  const params = {
+    agent_id:     req.query.agent_id     || '',
+    voice_id:     req.query.voice_id     || '',
+    contact_name: req.query.contact_name || '',
+    address:      req.query.address      || ''
+  };
 
-  // build a TwiML <Connect><Stream> with four <Parameter> children:
+  // Basic validation:
+  if (!params.agent_id || !params.voice_id || !params.contact_name || !params.address) {
+    console.error('❌ [TwiML] Missing one of agent_id, voice_id, contact_name, address');
+    return res.status(400).send('Missing required fields');
+  }
+
+  // Build TwiML
   const twiml = `
 <Response>
   <Connect>
-    <Stream url="${wsUrl}">
-      <Parameter name="agent_id"      value="${req.query.agent_id      || ''}" />
-      <Parameter name="voice_id"      value="${req.query.voice_id      || ''}" />
-      <Parameter name="contact_name"  value="${req.query.contact_name  || ''}" />
-      <Parameter name="address"       value="${req.query.address       || ''}" />
+    <Stream url="${wsBase}">
+      <Parameter name="agent_id"      value="${params.agent_id}" />
+      <Parameter name="voice_id"      value="${params.voice_id}" />
+      <Parameter name="contact_name"  value="${params.contact_name}" />
+      <Parameter name="address"       value="${params.address}" />
     </Stream>
   </Connect>
-  <!-- fallback pause so call doesn’t drop immediately -->
   <Pause length="30"/>
 </Response>`.trim();
 
-  console.log('🔗 [TwiML] sending Connect/Stream with Parameters:');
-  console.log('    agent_id     =', req.query.agent_id);
-  console.log('    voice_id     =', req.query.voice_id);
-  console.log('    contact_name =', req.query.contact_name);
-  console.log('    address      =', req.query.address);
-
+  console.log('🔗 [TwiML] sending Connect/Stream with Parameters:', params);
   res.set('Content-Type', 'text/xml');
   res.send(twiml);
 });
 
-// 3) Wire up raw HTTP -> WS upgrade
+// 3) WebSocket upgrade
 const wss = new WebSocket.Server({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   if (req.url.startsWith('/media')) {
@@ -74,59 +67,57 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-// 4) On each new media WS connection…
+// 4) WS connection handler
 wss.on('connection', (ws, req) => {
   console.log('✅ [WebSocket] connected');
 
-  let params = null;
-  let callSid = null;
-
-  // wait for the very first “start” message from Twilio:
-  ws.once('message', chunk => {
-    // it comes in as text JSON
+  ws.on('message', chunk => {
     let msg;
     try {
       msg = JSON.parse(chunk.toString());
     } catch (err) {
-      console.error('💥 [WebSocket] could not parse first message as JSON', err);
-      return ws.close();
+      console.warn('⚠️ [WebSocket] non-JSON message – ignoring');
+      return;
     }
 
-    if (msg.event !== 'start' || !msg.start) {
-      console.error('💥 [WebSocket] unexpected first event, closing', msg);
-      return ws.close();
+    console.log('📡 [WebSocket] got event:', msg.event);
+    if (msg.event === 'connected') {
+      // Twilio’s handshake – ignore
+      return;
     }
 
-    // grab your parameters out of the “start” event
-    params = msg.start.parameters || {};
-    callSid = msg.start.callSid || msg.start.streamSid;
+    if (msg.event === 'start' && msg.start) {
+      const p = msg.start.parameters || {};
+      const callSid = msg.start.callSid || msg.start.streamSid;
+      console.log('    • callSid:', callSid);
+      console.log('    • parameters:', p);
 
-    console.log('📡 [WebSocket] media-start event:');
-    console.log('    callSid =', callSid);
-    console.log('    parameters =', params);
+      const { agent_id, voice_id, contact_name, address } = p;
+      if (!agent_id || !voice_id || !contact_name || !address) {
+        console.error('❌ [WebSocket] missing parameters – closing');
+        return ws.close();
+      }
 
-    const { agent_id, voice_id, contact_name, address } = params;
-    if (!agent_id || !voice_id || !contact_name || !address) {
-      console.error('❌ [WebSocket] missing required parameters, closing');
-      return ws.close();
+      // Kick off TTS
+      streamTTS(agent_id, voice_id, contact_name, address, ws);
+      return;
     }
 
-    // now we can call ElevenLabs and pipe audio into the WS
-    streamTTS(agent_id, voice_id, contact_name, address, ws);
+    // We could also log inbound RTP frames (msg.event==='media'), but we don't need them
   });
 
   ws.on('close', code => console.log(`🛑 [WebSocket] closed (${code})`));
-  ws.on('error', err =>   console.error('💥 [WebSocket] error:', err));
+  ws.on('error', err => console.error('💥 [WebSocket] error:', err.message));
 });
 
-// helper: stream ElevenLabs TTS into an open WS
+// 5) TTS streaming helper
 async function streamTTS(agentId, voiceId, name, addr, ws) {
   const text = `Hi ${name}, just confirming your appointment at ${addr}.`;
-  console.log('✉️  [TTS] streaming text:', text);
+  console.log('✉️  [TTS] streaming:', text);
 
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
-    console.error('❌ [TTS] no ELEVENLABS_API_KEY in env, aborting');
+    console.error('❌ [TTS] ELEVENLABS_API_KEY not set');
     return ws.close();
   }
 
@@ -148,20 +139,19 @@ async function streamTTS(agentId, voiceId, name, addr, ws) {
     });
 
     resp.data.on('data', chunk => {
-      console.log(`📦 [TTS] sending ${chunk.length} bytes of μ-law audio`);
+      console.log(`📦 [TTS] sending ${chunk.length} bytes`);
       ws.send(chunk);
     });
     resp.data.on('end', () => {
-      console.log('✅ [TTS] stream ended, closing WS');
+      console.log('✅ [TTS] complete – closing WS');
       ws.close();
     });
   } catch (err) {
-    console.error('💥 [TTS] error from ElevenLabs:', err.response?.status, err.message);
+    console.error('💥 [TTS] ElevenLabs error:', err.response?.status, err.message);
     ws.close();
   }
 }
 
-// 5) fire up the server
 server.listen(port, () => {
   console.log(`🚀 AI Call Server listening on port ${port}`);
 });
