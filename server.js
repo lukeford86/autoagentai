@@ -27,11 +27,12 @@ app.all('/twiml', (req, res) => {
   }
 
   const wsUrl = `wss://${req.headers.host}/media?agent_id=${agent_id}&voice_id=${voice_id}&contact_name=${contact_name}&address=${address}`;
+  const escapedWsUrl = wsUrl.replace(/&/g, '&amp;');
 
   const twiml = `
     <Response>
       <Start>
-        <Stream url="${wsUrl}" />
+        <Stream url="${escapedWsUrl}" />
       </Start>
     </Response>
   `;
