@@ -15,6 +15,9 @@ app.get('/', (req, res) => {
   res.send('✅ AI Call Server is live');
 });
 
+// Escape helper for TwiML XML
+const escapeXml = (unsafe) => unsafe.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
 // TwiML endpoint
 app.all('/twiml', (req, res) => {
   const { agent_id, voice_id, contact_name, address } = req.query;
@@ -25,11 +28,10 @@ app.all('/twiml', (req, res) => {
   }
 
   const wsUrl = `wss://${req.headers.host}/media?agent_id=${agent_id}&voice_id=${voice_id}&contact_name=${contact_name}&address=${address}`;
-
   const twiml = `
     <Response>
       <Start>
-        <Stream url="${wsUrl}" />
+        <Stream url="${escapeXml(wsUrl)}" />
       </Start>
     </Response>
   `;
