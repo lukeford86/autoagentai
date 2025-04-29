@@ -21,14 +21,16 @@ const deepgram = new Deepgram(deepgramApiKey);
 app.get('/twiml', (req, res) => {
   const agentId = req.query.agent_id;
   const voiceId = req.query.voice_id;
+  const contactName = req.query.contact_name;
+  const address = req.query.address;
 
-  if (!agentId || !voiceId) {
-    return res.status(400).send('Missing agent_id or voice_id');
+  if (!agentId || !voiceId || !contactName || !address) {
+    return res.status(400).send('Missing required fields');
   }
 
   const response = new VoiceResponse();
   response.start().stream({
-    url: `wss://${req.headers.host}/media?agent_id=${agentId}&voice_id=${voiceId}`,
+    url: `wss://${req.headers.host}/media?agent_id=${agentId}&voice_id=${voiceId}&contact_name=${encodeURIComponent(contactName)}&address=${encodeURIComponent(address)}`
   });
 
   res.type('text/xml');
@@ -46,8 +48,10 @@ wss.on('connection', (ws, req) => {
   const params = new URLSearchParams(req.url.split('?')[1]);
   const agentId = params.get('agent_id');
   const voiceId = params.get('voice_id');
+  const contactName = params.get('contact_name');
+  const address = params.get('address');
 
-  console.log(`🎯 Agent ID: ${agentId}, Voice ID: ${voiceId}`);
+  console.log(`🎯 Connected for Contact: ${contactName}, Address: ${address}`);
 
   // Connect to Deepgram Streaming API
   const deepgramSocket = deepgram.transcription.live({
@@ -68,7 +72,7 @@ wss.on('connection', (ws, req) => {
       console.log(`📝 Deepgram Transcript: ${transcript}`);
 
       try {
-        const gptReply = await generateReplyFromGPT(transcript);
+        const gptReply = await generateReplyFromGPT(transcript, contactName, address);
         const voiceStream = await streamVoiceFromResemble(gptReply, voiceId);
 
         // Send Resemble audio stream back to Twilio
@@ -136,11 +140,13 @@ wss.on('connection', (ws, req) => {
 
 // --- Functions ---
 
-async function generateReplyFromGPT(userText) {
+async function generateReplyFromGPT(userText, contactName, address) {
+  const systemPrompt = `You are a friendly real estate agent AI assistant. You are calling ${contactName} about their property at ${address}. Offer a free property valuation, mention there have been some recent sales nearby, and suggest booking a time for a free property price update. Be natural, confident, and not pushy.`;
+
   const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-    model: 'gpt-4o', // or another model
+    model: 'gpt-4o',
     messages: [
-      { role: "system", content: "You are a friendly real estate AI helping to book free property valuations. Be natural and conversational." },
+      { role: "system", content: systemPrompt },
       { role: "user", content: userText }
     ]
   }, {
