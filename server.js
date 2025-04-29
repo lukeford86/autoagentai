@@ -1,19 +1,23 @@
 const express = require('express');
 const http = require('http');
-const { Server: WebSocketServer } = require('ws');
-const { VoiceResponse } = require('twilio').twiml;
-const url = require('url');
-
-const PORT = process.env.PORT || 10000;
-
+const WebSocket = require('ws');
+const cors = require('cors');
 const app = express();
+
+// Setup HTTP server manually for ws upgrade handling
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+const port = process.env.PORT || 10000;
 
-// --- TwiML endpoint ---
+// Allow CORS
+app.use(cors());
+
+// Route: Health check
+app.get('/', (req, res) => {
+  res.send('✅ AI Call Server is live');
+});
+
+// Route: TwiML endpoint
 app.all('/twiml', (req, res) => {
-  console.log('✅ [HTTP] /twiml HIT');
-
   const { agent_id, voice_id, contact_name, address } = req.query;
 
   if (!agent_id || !voice_id || !contact_name || !address) {
@@ -21,49 +25,59 @@ app.all('/twiml', (req, res) => {
     return res.status(400).send('Missing required fields');
   }
 
-  const response = new VoiceResponse();
-  response.start().stream({
-    url: `wss://${req.headers.host}/media?agent_id=${encodeURIComponent(agent_id)}&voice_id=${encodeURIComponent(voice_id)}&contact_name=${encodeURIComponent(contact_name)}&address=${encodeURIComponent(address)}`
-  });
+  const wsUrl = `wss://${req.headers.host}/media?agent_id=${agent_id}&voice_id=${voice_id}&contact_name=${contact_name}&address=${address}`;
 
-  res.type('text/xml');
-  res.send(response.toString());
+  const twiml = `
+    <Response>
+      <Start>
+        <Stream url="${wsUrl}" />
+      </Start>
+    </Response>
+  `;
+
+  console.log('✅ [TwiML] /twiml HIT');
+  res.set('Content-Type', 'text/xml');
+  res.send(twiml.trim());
 });
 
-// --- WebSocket Upgrade Handler ---
-server.on('upgrade', (request, socket, head) => {
-  const pathname = url.parse(request.url).pathname;
+// WebSocket Server
+const wss = new WebSocket.Server({ noServer: true });
 
-  if (pathname === '/media') {
-    console.log('✅ [UPGRADE] WebSocket upgrade to /media');
+server.on('upgrade', (request, socket, head) => {
+  if (request.url.startsWith('/media')) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
   } else {
-    console.warn('⚠️ [UPGRADE] Unknown path', pathname);
     socket.destroy();
   }
 });
 
-// --- WebSocket Connection Handler ---
-wss.on('connection', (ws, request) => {
-  console.log('✅ [WebSocket] Connection established');
+// WebSocket Connection Handler
+wss.on('connection', (ws, req) => {
+  const urlParams = new URLSearchParams(req.url.replace('/media?', ''));
+  const agentId = urlParams.get('agent_id');
+  const voiceId = urlParams.get('voice_id');
+  const contactName = urlParams.get('contact_name');
+  const address = urlParams.get('address');
 
-  ws.on('message', (message) => {
-    console.log('📥 [WebSocket] Message received', message.length, 'bytes');
-    // This is where incoming audio/media can be handled later
+  console.log(`🎤 WebSocket connected for ${contactName} @ ${address}`);
+
+  ws.on('message', (data) => {
+    console.log('📥 Received WebSocket message (media chunk)');
+    // In production: Send audio to ElevenLabs or transcription engine here
   });
 
   ws.on('close', () => {
-    console.log('❌ [WebSocket] Connection closed');
+    console.log('🛑 WebSocket closed');
   });
 
-  ws.on('error', (error) => {
-    console.error('❌ [WebSocket] Error', error);
+  ws.on('error', (err) => {
+    console.error('💥 WebSocket error:', err.message);
   });
 });
 
-// --- Start Server ---
-server.listen(PORT, () => {
-  console.log(`✅ AI Call Server running on port ${PORT}`);
+// Start server
+server.listen(port, () => {
+  console.log(`✅ AI Call Server running on port ${port}`);
 });
