@@ -1,4 +1,3 @@
-// server.js
 require('dotenv').config();
 
 const express      = require('express');
@@ -15,67 +14,61 @@ app.get('/', (req, res) => res.send('OK'));
 
 // TwiML endpoint
 app.post('/twiml', (req, res) => {
+  // these come from the URL you set on your Calls.create()
   const { agent_id, voice_id, contact_name, address } = req.query;
   console.log('[TwiML] Received query params:', { agent_id, voice_id, contact_name, address });
 
   const host = req.headers.host;
   const wsBase = process.env.WS_URL || `wss://${host}/media`;
-  const params = new URLSearchParams({ agent_id, voice_id, contact_name, address });
 
   const twiml = new VoiceResponse();
-  twiml
-    .connect()
-      .stream({ url: `${wsBase}?${params.toString()}` });
-  // keep call alive while WS is open
+  const connect = twiml.connect();
+  const stream  = connect.stream({ url: wsBase });
+
+  // 👇— here’s the critical bit: use <Parameter> tags so Twilio populates start.customParameters
+  stream.parameter({ name: 'agent_id',     value: agent_id     });
+  stream.parameter({ name: 'voice_id',     value: voice_id     });
+  stream.parameter({ name: 'contact_name', value: contact_name });
+  stream.parameter({ name: 'address',      value: address      });
+
+  // keep the call alive while you proxy the WebSocket
   twiml.pause({ length: 3600 });
 
   res.type('text/xml').send(twiml.toString());
 });
 
-// create HTTP + WS server
+// make a single HTTP + WS server
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/media' });
 
 wss.on('connection', (twilioWs, req) => {
   console.log('[WS] Twilio stream opened, waiting for start event…');
-
   let aiWs = null;
 
-  twilioWs.on('message', (raw) => {
+  twilioWs.on('message', raw => {
     let msg;
-    try {
-      msg = JSON.parse(raw);
-    } catch (err) {
-      return;
-    }
+    try { msg = JSON.parse(raw); }
+    catch (_) { return; }
 
-    // when Twilio tells us "start", grab its customParameters
     if (msg.event === 'start') {
       const cp = msg.start.customParameters || {};
-      const params = {
-        agent_id:     cp.agent_id,
-        voice_id:     cp.voice_id,
-        contact_name: cp.contact_name,
-        address:      cp.address,
-      };
-      console.log('[WS] start→ customParameters:', params);
+      console.log('[WS] start → customParameters:', cp);
 
-      // open your AI agent WS
+      // now open your AI agent WS with those params in the query string
       const aiUrl = `wss://autoagentai.onrender.com/media?` +
-                    new URLSearchParams(params).toString();
-      aiWs = new WebSocket(aiUrl);
+                    new URLSearchParams(cp).toString();
 
-      aiWs.on('open',    () => console.log('[AI WS] connected'));
-      aiWs.on('message', (aiData) => { twilioWs.send(aiData); });
-      aiWs.on('close',   () => {
+      aiWs = new WebSocket(aiUrl);
+      aiWs.on('open',    ()        => console.log('[AI WS] connected'));
+      aiWs.on('message', data      => twilioWs.send(data));
+      aiWs.on('close',   ()        => {
         console.log('[AI WS] closed');
         if (twilioWs.readyState === WebSocket.OPEN) twilioWs.close();
       });
-
       return;
     }
 
-    // forward all media frames to AI
+    // proxy all media frames after start
     if (msg.event === 'media' && aiWs && aiWs.readyState === WebSocket.OPEN) {
       aiWs.send(raw);
     }
