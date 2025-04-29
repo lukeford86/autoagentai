@@ -8,24 +8,23 @@ const WebSocket = require('ws');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Setup body parsing (optional but harmless)
+// Setup parsers
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Environment variables
+// Env vars
 const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
 const openRouterApiKey = process.env.OPENROUTER_API_KEY;
 const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
 
 const deepgram = new Deepgram(deepgramApiKey);
 
-// --- Serve dynamic TwiML ---
+// --- Serve TwiML dynamically ---
 app.all('/twiml', (req, res) => {
   try {
     console.log('✅ [TwiML] /twiml hit');
 
-    // Always pull from query (Twilio posts query params)
-    const params = req.query;
+    const params = req.query; // Always from query for Twilio
 
     const agentId = params.agent_id;
     const voiceId = params.voice_id;
@@ -45,27 +44,35 @@ app.all('/twiml', (req, res) => {
     res.type('text/xml');
     res.send(response.toString());
   } catch (err) {
-    console.error('❌ [TwiML] Server Error:', err);
+    console.error('❌ [TwiML Server Error]:', err);
     res.status(500).send('Internal Server Error');
   }
 });
 
-// --- Create HTTP server and WebSocket server ---
+// --- Create HTTP + WebSocket server ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/media' });
 
-// --- WebSocket Connection ---
+// --- WebSocket Connections ---
 wss.on('connection', (ws, req) => {
-  try {
-    console.log('📞 [Twilio] WebSocket connection established');
+  console.log('📞 [Twilio] WebSocket connection established');
 
+  ws.on('error', (error) => {
+    console.error('❌ [WebSocket Connection Error]:', error);
+  });
+
+  ws.on('close', () => {
+    console.log('🔒 [WebSocket Connection closed]');
+  });
+
+  try {
     const params = new URLSearchParams(req.url.split('?')[1]);
     const agentId = params.get('agent_id');
     const voiceId = params.get('voice_id');
     const contactName = params.get('contact_name');
     const address = params.get('address');
 
-    console.log(`🎯 [Twilio] Params Received:`, { agentId, voiceId, contactName, address });
+    console.log('🎯 [WebSocket Params]', { agentId, voiceId, contactName, address });
 
     const deepgramSocket = deepgram.transcription.live({
       language: 'en-AU',
@@ -75,16 +82,16 @@ wss.on('connection', (ws, req) => {
       sample_rate: 8000,
     });
 
-    deepgramSocket.on('open', () => console.log('🔗 [Deepgram] Connected successfully'));
+    deepgramSocket.on('open', () => console.log('🔗 [Deepgram] Connected'));
     deepgramSocket.on('error', (error) => console.error('❌ [Deepgram Error]:', error));
-    deepgramSocket.on('close', () => console.log('🔒 [Deepgram] Socket closed'));
+    deepgramSocket.on('close', () => console.log('🔒 [Deepgram Closed]'));
 
     ws.on('message', async (data) => {
       try {
         const message = JSON.parse(data);
 
         if (message.event === 'start') {
-          console.log(`✅ [Twilio] Call Started: ${message.streamSid}`);
+          console.log(`✅ [Twilio] Call Started - StreamSid: ${message.streamSid}`);
         }
 
         if (message.event === 'media') {
@@ -96,7 +103,7 @@ wss.on('connection', (ws, req) => {
         }
 
         if (message.event === 'stop') {
-          console.log(`🛑 [Twilio] Call Stopped: ${message.streamSid}`);
+          console.log(`🛑 [Twilio] Call Stopped - StreamSid: ${message.streamSid}`);
           ws.close();
           deepgramSocket.finish();
         }
@@ -105,18 +112,9 @@ wss.on('connection', (ws, req) => {
       }
     });
 
-    ws.on('close', () => {
-      console.log('🔒 [WebSocket] Connection closed');
-      if (deepgramSocket.readyState === 1) {
-        deepgramSocket.finish();
-      }
-    });
-
-    ws.on('error', (error) => console.error('❌ [WebSocket Error]:', error));
-
     deepgramSocket.on('transcriptReceived', async (data) => {
       try {
-        const transcript = data.channel.alternatives[0].transcript;
+        const transcript = data.channel.alternatives[0]?.transcript;
         if (transcript && transcript.length > 0) {
           console.log(`📝 [Deepgram Transcript]: ${transcript}`);
 
@@ -130,7 +128,7 @@ wss.on('connection', (ws, req) => {
             }
           });
 
-          audioStream.on('end', () => console.log('✅ [ElevenLabs] Finished streaming to Twilio'));
+          audioStream.on('end', () => console.log('✅ [ElevenLabs] Finished streaming voice'));
         }
       } catch (err) {
         console.error('❌ [Transcript Handling Error]:', err);
@@ -138,13 +136,13 @@ wss.on('connection', (ws, req) => {
     });
 
   } catch (err) {
-    console.error('❌ [WebSocket Server Error]:', err);
+    console.error('❌ [WebSocket Server Handling Error]:', err);
   }
 });
 
-// --- GPT Reply Function ---
+// --- GPT System Prompt Function ---
 async function generateReplyFromGPT(userText, contactName, address) {
-  const systemPrompt = `You are a helpful real estate agent AI assistant. You are calling ${contactName} about their property at ${address}. Offer a free property valuation and ask if they'd like an update about recent local sales. Be natural and professional.`;
+  const systemPrompt = `You are an AI real estate assistant helping an agent. You are calling ${contactName} about ${address}. Offer a free property valuation and ask politely if they want an update on recent home sales in their area. Keep it friendly and natural.`;
 
   const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
     model: 'gpt-4o',
@@ -164,7 +162,7 @@ async function generateReplyFromGPT(userText, contactName, address) {
   return reply;
 }
 
-// --- ElevenLabs Streaming Voice Function ---
+// --- ElevenLabs Streaming ---
 async function streamVoiceFromElevenLabs(text, voiceId) {
   const response = await axios({
     method: 'POST',
@@ -187,7 +185,7 @@ async function streamVoiceFromElevenLabs(text, voiceId) {
   return response.data;
 }
 
-// --- Start Server ---
+// --- Start the Server ---
 server.listen(PORT, () => {
   console.log(`✅ AI Call Server running on port ${PORT}`);
 });
