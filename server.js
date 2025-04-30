@@ -1,13 +1,13 @@
 // server.js
 require('dotenv').config();
 
-const express         = require('express');
-const bodyParser      = require('body-parser');
+const express           = require('express');
+const bodyParser        = require('body-parser');
 const { VoiceResponse } = require('twilio').twiml;
-const { Deepgram }    = require('@deepgram/sdk');
+const { Deepgram }      = require('@deepgram/sdk');
 const { ElevenLabsClient } = require('elevenlabs');
-const OpenAI          = require('openai');
-const WebSocket       = require('ws');
+const OpenAI            = require('openai');
+const WebSocket         = require('ws');
 
 const {
   DEEPGRAM_API_KEY,
@@ -16,7 +16,7 @@ const {
   PORT = 10000,
 } = process.env;
 
-// sanity check
+// Sanity check env
 for (let key of ['DEEPGRAM_API_KEY','ELEVENLABS_API_KEY','OPENROUTER_API_KEY']) {
   if (!process.env[key]) {
     console.error(`🚨 Missing env var: ${key}`);
@@ -24,7 +24,7 @@ for (let key of ['DEEPGRAM_API_KEY','ELEVENLABS_API_KEY','OPENROUTER_API_KEY']) 
   }
 }
 
-// init SDK clients
+// Init SDK clients
 const deepgram = new Deepgram(DEEPGRAM_API_KEY);
 const eleven   = new ElevenLabsClient({ apiKey: ELEVENLABS_API_KEY });
 const openai   = new OpenAI({ apiKey: OPENROUTER_API_KEY });
@@ -32,7 +32,7 @@ const openai   = new OpenAI({ apiKey: OPENROUTER_API_KEY });
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// 1) TwiML endpoint — no <Say>, just <Connect><Stream>
+// 1) TwiML endpoint — returns <Connect><Stream>
 app.post('/twiml', (req, res) => {
   const params = {
     agent_id:     req.query.agent_id     || req.body.agent_id,
@@ -46,123 +46,142 @@ app.post('/twiml', (req, res) => {
   const connect = twiml.connect();
   connect.stream({
     url:        `wss://${req.headers.host}/media`,
-    // don't specify track → streams inbound by default
-    parameters: params
+    track:      'both_tracks',
+    parameters: params,
   });
 
+  console.log('[TwiML XML]\n' + twiml.toString());
   res.type('text/xml').send(twiml.toString());
 });
 
-// 2) Start HTTP + WS server
+// 2) HTTP & WebSocket upgrade
 const server = app.listen(PORT, () => {
   console.log(`✅ Listening on port ${PORT}`);
   console.log('==> Your service is live 🎉');
 });
 
 const wss = new WebSocket.Server({ noServer: true });
+
 server.on('upgrade', (req, socket, head) => {
+  console.log('[Upgrade] incoming request for:', req.url);
   if (req.url.startsWith('/media')) {
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+    console.log('[Upgrade] matched /media, upgrading to WS');
+    wss.handleUpgrade(req, socket, head, ws => {
+      wss.emit('connection', ws, req);
+    });
   } else {
+    console.log('[Upgrade] not /media, destroying socket');
     socket.destroy();
   }
 });
 
-// 3) Handle each Twilio Media Stream
+// 3) Handle Twilio MediaStream WS
 wss.on('connection', (ws, req) => {
-  console.log('[WS] Twilio MediaStream connected');
-  let dgSocket, params;
+  console.log('[WS] Connection established, URL:', req.url);
+
+  let dgSocket;
+  let params;
 
   ws.on('message', async raw => {
-    const msg = JSON.parse(raw);
+    let msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch (e) {
+      console.error('[WS] Invalid JSON:', raw);
+      return;
+    }
+    console.log('[WS] raw event:', msg.event, msg);
 
-    if (msg.event === 'start') {
+    if (msg.event === 'connected') {
+      console.log('[WS] Twilio call connected');
+    }
+
+    else if (msg.event === 'start') {
       params = msg.start.customParameters;
-      console.log('[WS] start →', params);
+      console.log('[WS] Media start, parameters:', params);
 
-      // set up Deepgram transcription
+      // Start Deepgram live transcription
       dgSocket = deepgram.transcription.live({
-        punctuate:     true,
-        encoding:      'mulaw',
-        sample_rate:   8000,
-        language:      'en-US'
+        encoding:    'mulaw',
+        sample_rate: 8000,
+        punctuate:   true,
+        language:    'en-US',
       });
       dgSocket.open();
 
-      dgSocket.addListener('open',    () => console.log('[Deepgram] open'));
-      dgSocket.addListener('close',   () => console.log('[Deepgram] closed'));
+      dgSocket.addListener('open',    () => console.log('[Deepgram] socket open'));
+      dgSocket.addListener('close',   () => console.log('[Deepgram] socket closed'));
       dgSocket.addListener('error',   e => console.error('[Deepgram] error', e));
       dgSocket.addListener('transcriptReceived', async dg => {
-        const text = dg.channel.alternatives[0].transcript;
+        const text = dg.channel.alternatives[0].transcript.trim();
         console.log('[Deepgram]', dg.is_final ? 'final:' : 'interim:', text);
-        // only fire AI/TTS when Deepgram says it's final
-        if (dg.is_final && text.trim()) {
-          await handleAiTts(text.trim(), params, ws);
+        if (dg.is_final && text) {
+          await handleAiTts(text, params, ws);
         }
       });
     }
+
     else if (msg.event === 'media') {
-      // guard against sending before Deepgram WS is open
+      // inbound audio chunk → Deepgram
+      const buffer = Buffer.from(msg.media.payload, 'base64');
       if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
         try {
-          const audio = Buffer.from(msg.media.payload, 'base64');
-          dgSocket.send(audio);
+          dgSocket.send(buffer);
         } catch {
-          console.warn('[Deepgram] skipped send: socket not open');
+          console.warn('[Deepgram] send skipped, socket not open');
         }
       }
     }
+
     else if (msg.event === 'stop') {
-      console.log('[WS] stop');
+      console.log('[WS] MediaStream stop');
       dgSocket?.finish();
     }
   });
 
   ws.on('close', () => {
-    console.log('[WS] disconnected');
+    console.log('[WS] client disconnected');
     dgSocket?.finish();
   });
 });
 
-// 4) Once you have a final transcript, run through OpenAI → ElevenLabs → back to Twilio
+// 4) AI + TTS → Twilio
 async function handleAiTts(userText, params, ws) {
   try {
-    console.log('[AI] Asking GPT for next line…');
-    // prime AI so that its very first reply is your appointment reminder
-    const systemPrompt = 
-      `You are an appointment reminder bot. Contact: ${params.contact_name}, Address: ${params.address}.`
-      + ` Wait silently until they say "Hello". Once they say hello, immediately respond with`
-      + ` "Hi ${params.contact_name}, just confirming your appointment at ${params.address}."`
-      + ` Then end if no further input.`;
+    console.log('[AI] Generating reply for:', userText);
+    const systemPrompt =
+      `You are an appointment reminder assistant. Contact: ${params.contact_name}, Address: ${params.address}.`
+      + ` The client will say "Hello" to start. After they say hello, reply exactly:`
+      + ` "Hi ${params.contact_name}, just confirming your appointment at ${params.address}."`;
 
     const aiRes = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userText }
-      ]
+        { role: 'user',   content: userText },
+      ],
     });
     const reply = aiRes.choices[0].message.content.trim();
-    console.log('[AI] reply:', reply);
+    console.log('[AI] Reply:', reply);
 
     console.log('[TTS] Streaming ElevenLabs audio…');
     const ttsStream = await eleven.generate({
       voice:    params.voice_id,
       text:     reply,
       model_id: 'eleven_multilingual_v2',
-      stream:   true
+      stream:   true,
     });
 
-    // send each chunk back as an outbound media event
     for await (const chunk of ttsStream) {
       ws.send(JSON.stringify({
         event: 'media',
         media: {
-          track:   'outbound',             // must be exactly "outbound"
-          payload: chunk.toString('base64')
+          track:   'outbound_track',
+          payload: chunk.toString('base64'),
         }
       }));
     }
+    console.log('[TTS] Finished streaming');
   } catch (err) {
     console.error('[AI/TTS] error:', err);
   }
