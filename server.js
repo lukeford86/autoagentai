@@ -111,41 +111,77 @@ wss.on('connection', (ws, req) => {
 
     if (msg.event === 'start') {
       // Extract call context
-      callSid      = msg.start.callSid;
-      ({ agent_id: agentId, voice_id: voiceId, contact_name: contactName, address } = msg.start.customParameters);
+      callSid = msg.start.callSid;
+      
+      // Check if customParameters exists before destructuring
+      if (msg.start.customParameters) {
+        ({ agent_id: agentId, voice_id: voiceId, contact_name: contactName, address } = msg.start.customParameters);
+      } else {
+        console.warn('[WS] start event missing customParameters', msg.start);
+      }
+      
       console.log('[WS] start]', { callSid, agentId, voiceId, contactName, address });
 
       // Begin Deepgram live transcription
-      dgSocket = dgClient.transcription.live({
-        encoding:    'mulaw',
-        sample_rate: 8000,
-        punctuate:   true,
-        language:    'en-US'
-      });
-      dgSocket.open();
-      dgSocket.addListener('transcriptReceived', dg => {
-        if (!dg.is_final) return;
-        const text = dg.channel.alternatives[0].transcript.trim();
-        console.log('[Deepgram final]', text);
-        handleAiReply(text, { callSid, voiceId, contactName, address }, ws);
-      });
+      try {
+        dgSocket = dgClient.transcription.live({
+          encoding: 'mulaw',
+          sample_rate: 8000,
+          punctuate: true,
+          language: 'en-US'
+        });
+        
+        // Setup listeners before sending data
+        dgSocket.addListener('transcriptReceived', dg => {
+          if (!dg.is_final) return;
+          const text = dg.channel.alternatives[0].transcript.trim();
+          console.log('[Deepgram final]', text);
+          if (text) {
+            handleAiReply(text, { callSid, voiceId, contactName, address }, ws);
+          }
+        });
+        
+        dgSocket.addListener('error', error => {
+          console.error('[Deepgram] Error:', error);
+        });
+        
+        dgSocket.addListener('close', () => {
+          console.log('[Deepgram] Connection closed');
+        });
+        
+        console.log('[Deepgram] WebSocket connection established');
+      } catch (err) {
+        console.error('[Deepgram] Failed to initialize:', err);
+      }
     }
     else if (msg.event === 'media') {
       // Feed inbound audio to Deepgram
       const buffer = Buffer.from(msg.media.payload, 'base64');
-      if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+      if (dgSocket && dgSocket.getReadyState() === 1) { // 1 = OPEN in WebSocket standard
         dgSocket.send(buffer);
       }
     }
     else if (msg.event === 'stop') {
       console.log('[WS] stop event');
-      dgSocket?.finish();
+      if (dgSocket) {
+        try {
+          dgSocket.finish();
+        } catch (err) {
+          console.error('[Deepgram] Error finishing connection:', err);
+        }
+      }
     }
   });
 
   ws.on('close', () => {
     console.log('[WS] disconnected');
-    dgSocket?.finish();
+    if (dgSocket) {
+      try {
+        dgSocket.finish();
+      } catch (err) {
+        console.error('[Deepgram] Error finishing connection on WS close:', err);
+      }
+    }
   });
 });
 
@@ -156,6 +192,12 @@ async function handleAiReply(userText, ctx, ws) {
   try {
     const { callSid, voiceId, contactName, address } = ctx;
     console.log('[AI] user said:', userText);
+
+    // Skip if missing essential context
+    if (!voiceId || !contactName || !address) {
+      console.warn('[AI] Missing required context', ctx);
+      return;
+    }
 
     // Generate AI reply
     const systemPrompt = `
