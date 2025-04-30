@@ -8,7 +8,6 @@ import Twilio from "twilio";
 // Load environment variables from .env file
 dotenv.config();
 
-// Check for required environment variables
 const {
   ELEVENLABS_API_KEY,
   ELEVENLABS_AGENT_ID,
@@ -28,32 +27,26 @@ if (
   throw new Error("Missing required environment variables");
 }
 
-// Initialize Fastify server
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-// Use the PORT Render provides (or 8000 locally)
+// Use Render’s $PORT (fallback to 8000 locally) and bind on 0.0.0.0
 const PORT = Number(process.env.PORT) || 8000;
 const HOST = "0.0.0.0";
 
-// Root route for health check
 fastify.get("/", async (_, reply) => {
   reply.send({ message: "Server is running" });
 });
 
-// Initialize Twilio client
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Helper function to get signed URL for authenticated conversations
 async function getSignedUrl() {
   const response = await fetch(
     `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`,
     {
       method: "GET",
-      headers: {
-        "xi-api-key": ELEVENLABS_API_KEY,
-      },
+      headers: { "xi-api-key": ELEVENLABS_API_KEY },
     }
   );
   if (!response.ok) {
@@ -63,146 +56,94 @@ async function getSignedUrl() {
   return data.signed_url;
 }
 
-// Route to initiate outbound calls
+// ─── Outbound Call Route ───────────────────────────────────────────────────────
 fastify.post("/outbound-call", async (request, reply) => {
-  const { number, prompt, first_message } = request.body;
+  // Destructure with defaults
+  const {
+    number,
+    prompt = "",
+    first_message = "",
+  } = request.body as Record<string, string>;
 
+  // Validate
   if (!number) {
     return reply.code(400).send({ error: "Phone number is required" });
   }
+  if (!prompt) {
+    return reply.code(400).send({ error: "Prompt is required" });
+  }
+
+  // Log exactly what you got
+  console.log("[Outbound] Params:", { number, prompt, first_message });
+
+  // Build TwiML URL
+  const twimlUrl = `https://${request.headers.host}/outbound-call-twiml?` +
+    `prompt=${encodeURIComponent(prompt)}` +
+    `&first_message=${encodeURIComponent(first_message)}`;
+
+  console.log("[Outbound] TwiML URL:", twimlUrl);
 
   try {
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
       to: number,
-      // TwiML endpoint must be HTTPS and include your Render hostname
-      url: `https://${request.headers.host}/outbound-call-twiml?prompt=${encodeURIComponent(
-        prompt
-      )}&first_message=${encodeURIComponent(first_message)}`,
+      url: twimlUrl,
     });
-
-    reply.send({
+    console.log("[Twilio] Call initiated, SID:", call.sid);
+    return reply.send({
       success: true,
       message: "Call initiated",
       callSid: call.sid,
     });
-  } catch (error) {
-    console.error("Error initiating outbound call:", error);
-    reply.code(500).send({
+
+  } catch (err: any) {
+    // Log full error object
+    console.error("Error initiating outbound call:", err);
+
+    // Unwrap Twilio RestError if present
+    const status = err.status || 500;
+    const payload = {
       success: false,
-      error: "Failed to initiate call",
-    });
+      error: err.message || "Unknown error",
+      code: err.code || null,
+      moreInfo: err.moreInfo || err,
+    };
+
+    return reply.code(status).send(payload);
   }
 });
 
-// TwiML route for outbound calls
+// ─── TwiML Route ───────────────────────────────────────────────────────────────
 fastify.all("/outbound-call-twiml", async (request, reply) => {
-  const prompt = request.query.prompt || "";
+  const prompt        = request.query.prompt        || "";
   const first_message = request.query.first_message || "";
 
-  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
-      <Response>
-        <Connect>
-          <Stream url="wss://${request.headers.host}/outbound-media-stream">
-            <Parameter name="prompt" value="${prompt}" />
-            <Parameter name="first_message" value="${first_message}" />
-          </Stream>
-        </Connect>
-      </Response>`;
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  <Response>
+    <Connect>
+      <Stream url="wss://${request.headers.host}/outbound-media-stream">
+        <Parameter name="prompt"       value="${prompt}" />
+        <Parameter name="first_message" value="${first_message}" />
+      </Stream>
+    </Connect>
+  </Response>`;
 
-  reply.type("text/xml").send(twimlResponse);
+  reply.type("text/xml").send(twiml);
 });
 
-// WebSocket route for handling media streams
+// ─── WebSocket Media Streaming ─────────────────────────────────────────────────
 fastify.register(async (fastifyInstance) => {
   fastifyInstance.get(
     "/outbound-media-stream",
     { websocket: true },
     (ws, req) => {
       console.info("[Server] Twilio connected to outbound media stream");
-
-      let streamSid = null;
-      let callSid = null;
-      let elevenLabsWs = null;
-      let customParameters = null;
-
-      ws.on("error", console.error);
-
-      // Establish connection to ElevenLabs
-      const setupElevenLabs = async () => {
-        try {
-          const signedUrl = await getSignedUrl();
-          elevenLabsWs = new WebSocket(signedUrl);
-
-          elevenLabsWs.on("open", () => {
-            console.log("[ElevenLabs] Connected to Conversational AI");
-
-            const initialConfig = {
-              type: "conversation_initiation_client_data",
-              conversation_config_override: {
-                agent: {
-                  prompt: {
-                    prompt:
-                      customParameters?.prompt ||
-                      "you are a gary from the phone store",
-                  },
-                  first_message:
-                    customParameters?.first_message ||
-                    "hey there! how can I help you today?",
-                },
-              },
-            };
-
-            console.log(
-              "[ElevenLabs] Sending initial config with prompt:",
-              initialConfig.conversation_config_override.agent.prompt.prompt
-            );
-
-            elevenLabsWs.send(JSON.stringify(initialConfig));
-          });
-
-          elevenLabsWs.on("message", (data) => {
-            try {
-              const message = JSON.parse(data);
-              // … your switch/case handling …
-            } catch (err) {
-              console.error("[ElevenLabs] Error processing message:", err);
-            }
-          });
-
-          elevenLabsWs.on("error", (err) =>
-            console.error("[ElevenLabs] WebSocket error:", err)
-          );
-          elevenLabsWs.on("close", () =>
-            console.log("[ElevenLabs] Disconnected")
-          );
-        } catch (err) {
-          console.error("[ElevenLabs] Setup error:", err);
-        }
-      };
-
-      setupElevenLabs();
-
-      ws.on("message", (message) => {
-        try {
-          const msg = JSON.parse(message);
-          // … Twilio media handling …
-        } catch (err) {
-          console.error("[Twilio] Error processing message:", err);
-        }
-      });
-
-      ws.on("close", () => {
-        console.log("[Twilio] Client disconnected");
-        if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-          elevenLabsWs.close();
-        }
-      });
+      // … your existing WebSocket handler …
     }
   );
 });
 
-// **Bind to 0.0.0.0 so Render can route traffic in**
+// ─── Start server ──────────────────────────────────────────────────────────────
 fastify.listen({ port: PORT, host: HOST }, (err) => {
   if (err) {
     console.error("Error starting server:", err);
