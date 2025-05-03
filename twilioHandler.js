@@ -1,6 +1,5 @@
 import Twilio from 'twilio';
 import WebSocket from 'ws';
-import fetch from 'node-fetch';
 
 const {
   TWILIO_ACCOUNT_SID,
