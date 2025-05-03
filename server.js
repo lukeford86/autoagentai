@@ -8,14 +8,15 @@ import { handleCallWebhook, handleMediaStreamSocket } from './twilioHandler.js';
 dotenv.config();
 const app = Fastify({ logger: true });
 
+// Register Fastify plugins
 app.register(fastifyCors);
 app.register(fastifyFormBody);
 app.register(fastifyWs);
 
-// 1) HTTP POST → kicks off the Twilio call
+// 1) Kick off the call: use <Connect><Stream> for bidirectional media
 app.post('/start-call', handleCallWebhook);
 
-// 2) WebSocket → handles bi-directional audio for each call
+// 2) WebSocket entrypoint for media frames
 app.get('/media-stream', { websocket: true }, handleMediaStreamSocket);
 
 const PORT = process.env.PORT || 3000;
