@@ -8,29 +8,26 @@ import { handleCallWebhook, handleMediaStreamSocket } from './twilioHandler.js';
 dotenv.config();
 const app = Fastify({ logger: true });
 
-// register CORS + formbody
+// CORS & body parsing
 app.register(fastifyCors);
 app.register(fastifyFormBody);
 
-// register WebSocket but accept Twilio’s sub‐protocol
+// WebSocket plugin: explicitly accept Twilio’s media‐stream protocol
 app.register(fastifyWs, {
   handleProtocols: (protocols, req) => {
-    const offered = Object.keys(protocols);
-    req.log.info({ offered }, 'WebSocket protocols offered by client');
-    // Twilio Media Streams uses protocol “twilio-media-stream”
+    req.log.info({ offered: Object.keys(protocols) }, 'WS subprotocols offered');
     if (protocols['twilio-media-stream']) return 'twilio-media-stream';
-    // some samples mention “audio”
     if (protocols['audio']) return 'audio';
     return false;
   }
 });
 
-// 1) Kick off the call
+// 1️⃣ HTTP to kick off the call
 app.post('/start-call', handleCallWebhook);
 
-// 2) Media WS
+// 2️⃣ WS upgrade for media streaming
 app.get('/media-stream', { websocket: true }, handleMediaStreamSocket);
 
 const PORT = process.env.PORT || 3000;
 app.listen({ port: PORT, host: '0.0.0.0' })
-   .then(() => app.log.info(`Listening on ${PORT}`));
+   .then(() => app.log.info(`Server listening on port ${PORT}`));
