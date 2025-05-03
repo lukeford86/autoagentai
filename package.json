@@ -10,8 +10,8 @@
     "node": "22.x"
   },
   "dependencies": {
-    "@fastify/cors": "^8.4.0",
-    "@fastify/formbody": "^8.3.0",
+    "@fastify/cors": "^8.2.0",
+    "@fastify/formbody": "^7.6.0",
     "dotenv": "^16.3.1",
     "fastify": "^4.25.0",
     "twilio": "^4.15.0",
