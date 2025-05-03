@@ -9,20 +9,30 @@ const {
   ELEVENLABS_AGENT_ID
 } = process.env;
 
-// Twilio helper
+// Twilio helper & client
 const client = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const { twiml: { VoiceResponse } } = Twilio;
 
+// Helper to fetch a signed URL for your private agent
+async function getElevenUrl() {
+  const url = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`;
+  const res = await fetch(url, { headers: { 'xi-api-key': ELEVENLABS_API_KEY }});
+  if (!res.ok) throw new Error('Could not get signed ElevenLabs URL');
+  const { signed_url } = await res.json();
+  return signed_url;
+}
+
 /**
- * 1) Initiate an outbound call via Twilio, and tell Twilio
- *    “open a Media Stream at /media-stream and let me drive the audio.”
+ * 1) Initiate an outbound call via Twilio,
+ *    using <Connect><Stream> for bidirectional audio.
  */
 export async function handleCallWebhook(req, reply) {
   const { to } = req.body;
-  const host = req.headers.host; // e.g. "myapp.herokuapp.com"
+  const host = req.headers.host;
 
   const response = new VoiceResponse();
-  response.start().stream({ url: `wss://${host}/media-stream` });
+  const connect = response.connect();
+  connect.stream({ url: `wss://${host}/media-stream` });
 
   try {
     const call = await client.calls.create({
@@ -38,52 +48,40 @@ export async function handleCallWebhook(req, reply) {
 }
 
 /**
- * 2) For each incoming Twilio stream, open a matching ElevenLabs
- *    conversational WebSocket and proxy audio both ways.
+ * 2) WebSocket handler for Twilio Media Streams:
+ *    - On 'start' → open ElevenLabs WS
+ *    - On 'media' → proxy prospect audio into ElevenLabs
+ *    - On ElevenLabs 'message' → play agent audio back via Twilio
+ *    - On 'stop' or close → hang up
  */
 export async function handleMediaStreamSocket(connection, req) {
   const twilioSocket = connection.socket;
   let elevenSocket;
 
-  // Optionally: fetch a signed URL if your agent is private
-  async function getElevenUrl() {
-    if (!ELEVENLABS_API_KEY || !ELEVENLABS_AGENT_ID) {
-      throw new Error('Missing ElevenLabs credentials');
-    }
-    const url = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`;
-    const res = await fetch(url, {
-      headers: { 'xi-api-key': ELEVENLABS_API_KEY }
-    });
-    if (!res.ok) throw new Error('Could not get signed URL');
-    const body = await res.json();
-    return body.signed_url;
-  }
-
   twilioSocket.on('message', async raw => {
     const msg = JSON.parse(raw.toString());
 
-    // When Twilio opens the audio stream, spin up the ElevenLabs WS
+    // Prospect picked up: build ElevenLabs connection
     if (msg.event === 'start') {
       try {
         const wsUrl = await getElevenUrl();
         elevenSocket = new WebSocket(wsUrl);
 
         elevenSocket.on('open', () => {
-          // Kick off the conversation with your agent’s first prompt:
+          // Kick off the agent’s first line
           const init = {
-            system_prompt: "You are calling about a free property valuation request. Be friendly and concise.",
-            first_message: "Hi, this is Luke from Acme Realty. Are you interested in a free home valuation?",
+            system_prompt: "You are a real estate agent offering free home valuations. Be polite and concise.",
+            first_message: "Hi there, I'm Luke from Acme Realty. Would you like a free valuation of your home today?",
             stream: true
           };
           elevenSocket.send(JSON.stringify(init));
         });
 
-        // When ElevenLabs returns audio chunks, play them into Twilio:
         elevenSocket.on('message', data => {
-          // data is raw binary audio (μ-law 8000 Hz frames)
+          // data arrives as raw μ-law PCM frames
           const audioBase64 = Buffer.from(data).toString('base64');
           const vr = new VoiceResponse();
-          vr.play({ url: `data:audio/basic;codec=mulaw;rate=8000,${audioBase64}` });
+          vr.play({ url: `data:audio/basic;codec=mulaw;rate=8000;base64,${audioBase64}` });
           twilioSocket.send(vr.toString());
         });
 
@@ -100,13 +98,13 @@ export async function handleMediaStreamSocket(connection, req) {
       }
     }
 
-    // Forward caller’s speech into the agent:
-    if (msg.event === 'media' && elevenSocket && elevenSocket.readyState === WebSocket.OPEN) {
+    // Forward caller speech into the agent
+    if (msg.event === 'media' && elevenSocket?.readyState === WebSocket.OPEN) {
       const pcm = Buffer.from(msg.media.payload, 'base64');
       elevenSocket.send(pcm);
     }
 
-    // Clean up on call-end
+    // Clean up on call end
     if (msg.event === 'stop') {
       elevenSocket?.close();
       twilioSocket.close();
@@ -114,7 +112,7 @@ export async function handleMediaStreamSocket(connection, req) {
   });
 
   twilioSocket.on('close', () => {
-    req.log.info('Twilio Media Stream closed');
+    req.log.info('Twilio WebSocket closed');
     elevenSocket?.close();
   });
 }
