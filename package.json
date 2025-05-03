@@ -1,11 +1,13 @@
 {
-  "name": "ai-calling-bot",
+  "name": "autoagentai",
   "version": "1.0.0",
-  "description": "Node.js server to handle outbound AI voice calls via Twilio and ElevenLabs",
-  "main": "server.js",
   "type": "module",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": "22.x"
   },
   "dependencies": {
     "@fastify/cors": "^8.4.0",
