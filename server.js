@@ -1,35 +1,43 @@
+// server.js
 import Fastify from 'fastify';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 import fastifyCors from '@fastify/cors';
 import fastifyFormBody from '@fastify/formbody';
-import fastifyWs from '@fastify/websocket';
 import dotenv from 'dotenv';
 import { handleCallWebhook, handleMediaStreamSocket } from './twilioHandler.js';
 
 dotenv.config();
 
-const app = Fastify({ logger: true });
+// 1️⃣ Create Fastify & HTTP server
+const app    = Fastify({ logger: true });
+const server = http.createServer(app.handler);
 
-// Basic HTTP plugins
-app.register(fastifyCors);
-app.register(fastifyFormBody);
-
-// WebSocket plugin: accept Twilio’s exact sub-protocol
-app.register(fastifyWs, {
-  handleProtocols: (protocols, request) => {
-    // `protocols` here is an Array<string>
-    request.log.info({ protocols }, 'WS sub-protocols offered by client');
-    if (protocols.includes('twilio-media-stream')) return 'twilio-media-stream';
-    if (protocols.includes('audio'))              return 'audio';
-    return false;  // reject others
+// 2️⃣ Attach a raw ws server for /media-stream
+const wss = new WebSocketServer({
+  server,
+  path: '/media-stream',
+  handleProtocols: (offeredProtocols, request) => {
+    // Twilio will offer ['twilio-media-stream'] (or sometimes ['audio'])
+    request.log.info({ offeredProtocols }, 'WS subprotocols offered');
+    if (offeredProtocols.includes('twilio-media-stream')) return 'twilio-media-stream';
+    if (offeredProtocols.includes('audio'))              return 'audio';
+    return false; // reject
   }
 });
 
-// 1️⃣ Kick off the outbound call
+// 3️⃣ On each WS connection, hand off to your handler
+wss.on('connection', (socket, request) => {
+  handleMediaStreamSocket(socket, request, app.log);
+});
+
+// 4️⃣ Register REST endpoint on Fastify
+app.register(fastifyCors);
+app.register(fastifyFormBody);
 app.post('/start-call', handleCallWebhook);
 
-// 2️⃣ WebSocket handler for the Media Stream
-app.get('/media-stream', { websocket: true }, handleMediaStreamSocket);
-
-const PORT = parseInt(process.env.PORT) || 3000;
-app.listen({ port: PORT, host: '0.0.0.0' })
-   .then(() => app.log.info(`Server listening on port ${PORT}`));
+// 5️⃣ Start listening
+const PORT = Number(process.env.PORT) || 3000;
+server.listen(PORT, () => {
+  app.log.info(`HTTP+WS Server listening on port ${PORT}`);
+});
