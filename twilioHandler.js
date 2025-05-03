@@ -12,152 +12,154 @@ const {
 const client = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const { twiml: { VoiceResponse } } = Twilio;
 
-/** Fetch a signed WebSocket URL for your ElevenLabs agent **/
+// helper to get your signed URL
 async function getElevenUrl(log) {
   const url = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`;
-  log.info('⏳ Fetching ElevenLabs signed URL');
+  log.info('Fetching ElevenLabs signed URL', { url });
   const res = await fetch(url, { headers: { 'xi-api-key': ELEVENLABS_API_KEY }});
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`ElevenLabs URL fetch failed ${res.status}: ${txt}`);
+    const text = await res.text();
+    throw new Error(`ElevenLabs URL fetch failed ${res.status}: ${text}`);
   }
   const { signed_url } = await res.json();
-  log.info('✅ Received ElevenLabs signed URL');
+  log.info('Received ElevenLabs signed URL');
   return signed_url;
 }
 
-/** 1) Place the call using Connect/Stream for bidirectional media **/
+/** 1) Place the call with <Start><Stream> + <Pause> **/
 export async function handleCallWebhook(req, reply) {
   const { to } = req.body;
-  const host = req.headers.host; // e.g. "yourapp.render.com"
+  const host = req.headers.host;
 
-  // Build TwiML
+  // build unidirectional Stream + a long Pause to keep call alive
   const vr = new VoiceResponse();
-  const connect = vr.connect();
-  connect.stream({ url: `wss://${host}/media-stream` });  // no track attr = both_tracks
+  vr.start().stream({ url: `wss://${host}/media-stream` });
+  vr.pause({ length: 3600 });       // pause 1 hour
 
-  const twimlString = vr.toString();
-  req.log.info('📞 Generated TwiML for call', { twiml: twimlString });
+  const twiml = vr.toString();
+  req.log.info('Generated TwiML', { twiml });
 
   try {
     const call = await client.calls.create({
       to,
       from: TWILIO_PHONE_NUMBER,
-      twiml: twimlString
+      twiml
     });
-    req.log.info('✅ Call initiated', { callSid: call.sid });
+    req.log.info('Call initiated', { callSid: call.sid });
     return reply.send({ callSid: call.sid });
   } catch (err) {
-    req.log.error(err, '❌ Call initiation failed');
-    return reply.status(500).send({ error: 'Call initiation error' });
+    req.log.error(err, 'Call initiation failed');
+    return reply.status(500).send({ error: 'Call initiation failed' });
   }
 }
 
-/** 2) Handle the Twilio Media Stream WebSocket **/
+/** 2) Proxy Twilio ⟷ ElevenLabs **/
 export async function handleMediaStreamSocket(connection, req) {
   const twilioSocket = connection.socket;
-  req.log.info('🔌 Twilio WebSocket connection established');
+  req.log.info('🛰️  Twilio WS connected', {
+    proto: req.headers['sec-websocket-protocol']
+  });
 
-  let elevenSocket;
-  let streamSid;
+  let elevenSocket, streamSid;
 
   twilioSocket.on('message', async raw => {
+    // Twilio sends JSON text messages for control
     let msg;
     try {
       msg = JSON.parse(raw.toString());
     } catch (e) {
-      return req.log.error(e, '❌ Invalid JSON from Twilio');
+      return req.log.error(e, 'Failed to parse Twilio WS message');
     }
-    req.log.info('💬 Twilio →', msg);
+    req.log.info('Twilio →', msg);
 
     switch (msg.event) {
       case 'connected':
-        req.log.info('✅ Twilio event: connected');
+        req.log.info('Event: connected');
         break;
 
       case 'start':
-        // Stream metadata; grab the streamSid for future sends
+        // grab the Twilio streamSid
         streamSid = msg.start.streamSid;
-        req.log.info('✅ Twilio event: start', { streamSid, tracks: msg.start.tracks });
+        req.log.info('Event: start', { streamSid, tracks: msg.start.tracks });
 
-        // Open ElevenLabs WS
+        // now wire up ElevenLabs
         try {
           const wsUrl = await getElevenUrl(req.log);
+          req.log.info('Opening ElevenLabs WS', { wsUrl });
           elevenSocket = new WebSocket(wsUrl);
 
           elevenSocket.on('open', () => {
-            req.log.info('🔌 ElevenLabs WebSocket open');
-            // Kick off the conversation
+            req.log.info('ElevenLabs WS open – sending init prompt');
             elevenSocket.send(JSON.stringify({
-              system_prompt: 'You are an agent offering free home valuations, be friendly.',
+              system_prompt: 'You are a friendly real‐estate agent offering free home valuations.',
               first_message: "Hi, I'm Luke from Acme Realty. Would you like a free home valuation today?",
               stream: true
             }));
-            req.log.info('✉️ Sent init message to ElevenLabs agent');
           });
 
           elevenSocket.on('message', data => {
-            // ElevenLabs returns raw μ-law 8000Hz PCM
-            req.log.info('💬 ElevenLabs → raw audio', { bytes: data.length });
-            const audioBase64 = Buffer.from(data).toString('base64');
+            req.log.info('ElevenLabs → raw audio bytes', { length: data.length });
+            const payload = Buffer.from(data).toString('base64');
 
-            // Send back a JSON "media" message to Twilio
+            // send back a “media” JSON frame to Twilio
             const out = JSON.stringify({
               event: 'media',
               streamSid,
-              media: { payload: audioBase64 }
+              media: { payload }
             });
-            req.log.info('📤 Sending media to Twilio', { length: out.length });
+            req.log.info('📤 media → Twilio', { bytes: out.length });
             twilioSocket.send(out);
           });
 
           elevenSocket.on('error', err => {
-            req.log.error(err, '❌ ElevenLabs WebSocket error');
+            req.log.error(err, 'ElevenLabs WS error');
           });
 
-          elevenSocket.on('close', () => {
-            req.log.info('✂️ ElevenLabs WebSocket closed — hanging up Twilio');
-            // End the call
-            const hangup = JSON.stringify({ event: 'stop', streamSid });
-            twilioSocket.send(hangup);
+          elevenSocket.on('close', (code, reason) => {
+            req.log.info('ElevenLabs WS closed', { code, reason });
+            // once the agent closes, tell Twilio to stop & hangup
+            const stopMsg = JSON.stringify({ event: 'stop', streamSid });
+            twilioSocket.send(stopMsg);
             twilioSocket.close();
           });
 
         } catch (err) {
-          req.log.error(err, '❌ Could not open ElevenLabs WebSocket');
+          req.log.error(err, 'Failed to open ElevenLabs WS');
           twilioSocket.close();
         }
         break;
 
       case 'media':
-        // Forward only the caller's audio (inbound track) into ElevenLabs
-        if (msg.media.track === 'inbound' && elevenSocket?.readyState === WebSocket.OPEN) {
+        // forward only the caller’s audio frames
+        if (msg.media.track === 'inbound') {
           const pcm = Buffer.from(msg.media.payload, 'base64');
-          req.log.info('📥 Forwarding caller audio to ElevenLabs', { bytes: pcm.length });
-          elevenSocket.send(pcm);
-        } else {
-          req.log.info('⚠️ Dropped non-inbound or pre-open media chunk', msg.media.track);
+          req.log.info('📥 forwarding caller audio', { bytes: pcm.length });
+          if (elevenSocket?.readyState === WebSocket.OPEN) {
+            elevenSocket.send(pcm);
+          } else {
+            req.log.warn('ElevenLabs WS not open yet – dropping chunk');
+          }
         }
         break;
 
       case 'stop':
-        req.log.info('⏹️ Twilio event: stop — tearing down');
+        req.log.info('Event: stop – tearing down');
         elevenSocket?.close();
         twilioSocket.close();
         break;
 
       default:
-        req.log.info('ℹ️ Unhandled Twilio event', { event: msg.event });
+        req.log.info('Event: (unhandled)', { event: msg.event });
     }
   });
 
   twilioSocket.on('close', (code, reason) => {
-    req.log.info('🔌 Twilio WebSocket closed', { code, reason });
+    req.log.info('🔌 Twilio WS closed', { code, reason });
     elevenSocket?.close();
   });
 
   twilioSocket.on('error', err => {
-    req.log.error(err, '❌ Twilio WebSocket error');
+    req.log.error(err, 'Twilio WS error');
     elevenSocket?.close();
   });
 }
