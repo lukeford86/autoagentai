@@ -1,41 +1,107 @@
 import Twilio from 'twilio';
-import { WebSocket } from 'ws';
-import { getElevenLabsStream } from './elevenLabsClient.js';
+import https from 'https';
+import { MediaResponse } from '@twilio/voice-response';
 
-const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER } = process.env;
+const {
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE_NUMBER,
+  ELEVENLABS_API_KEY,
+  ELEVENLABS_VOICE_ID
+} = process.env;
+
 const client = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-export async function handleCallWebhook(request, reply) {
-  const { to, voicePrompt } = request.body;
+// 1) create the outbound call and open a media-stream
+export async function handleCallWebhook(req, reply) {
+  const { to } = req.body;
+  const host = req.headers.host; // used for WebSocket URL
+
+  const twiml = `<Response>
+                   <Start>
+                     <Stream url="wss://${host}/media-stream"/>
+                   </Start>
+                 </Response>`;
 
   try {
     const call = await client.calls.create({
-      twiml: `<Response><Start><Stream url="wss://your-server-domain.com/media-stream" /></Start><Say>${voicePrompt}</Say></Response>`,
+      twiml,
       to,
-      from: TWILIO_PHONE_NUMBER,
+      from: TWILIO_PHONE_NUMBER
     });
-
-    reply.send({ status: 'calling', callSid: call.sid });
-  } catch (error) {
-    console.error('Call error:', error);
-    reply.status(500).send({ error: 'Call failed' });
+    return reply.send({ callSid: call.sid });
+  } catch (err) {
+    req.log.error(err);
+    return reply.status(500).send({ error: 'Call failed' });
   }
 }
 
-export async function handleMediaStream(request, reply) {
-  const ws = new WebSocket(request.body.StreamSid);
-  ws.on('open', () => {
-    console.log('Twilio stream connected');
-    getElevenLabsStream(ws); // Stream ElevenLabs output to Twilio
+// 2) WebSocket handler for Twilio Media Streams
+export function handleMediaStreamSocket(connection, req) {
+  const socket = connection.socket;
+  let first = true;
+
+  socket.on('message', async (raw) => {
+    const msg = JSON.parse(raw.toString());
+
+    // Once Twilio opens the stream, push your first TTS
+    if (msg.event === 'start' && first) {
+      first = false;
+      streamElevenLabsAudio(
+        socket,
+        "Hi, I'm calling on behalf of your agent. Would you be interested in a free property valuation?"
+      );
+    }
+
+    // You can also listen for msg.event === 'media' to handle caller audio
   });
 
-  ws.on('message', (msg) => {
-    console.log('Twilio said:', msg.toString());
+  socket.on('close', () => {
+    req.log.info('WebSocket closed');
+  });
+}
+
+// 3) Pull ElevenLabs TTS and forward as Twilio <Play> via MediaResponse
+function streamElevenLabsAudio(socket, text) {
+  const options = {
+    hostname: 'api.elevenlabs.io',
+    path: `/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'audio/mpeg'
+    }
+  };
+
+  const req = https.request(options, (res) => {
+    res.on('data', (chunk) => {
+      const base64 = chunk.toString('base64');
+      const twiml = new MediaResponse();
+      twiml.play({ url: `data:audio/mpeg;base64,${base64}` });
+      socket.send(twiml.toString());
+    });
+
+    res.on('end', () => {
+      const twiml = new MediaResponse();
+      twiml.hangup();
+      socket.send(twiml.toString());
+      socket.close();
+    });
   });
 
-  ws.on('close', () => {
-    console.log('Twilio stream closed');
+  req.on('error', (err) => {
+    console.error('ElevenLabs streaming error:', err);
+    socket.close();
   });
 
-  reply.send({ status: 'stream connected' });
+  req.write(JSON.stringify({
+    text,
+    model_id: 'eleven_monolingual_v1',
+    voice_settings: {
+      stability: 0.5,
+      similarity_boost: 0.75
+    }
+  }));
+  req.end();
 }
