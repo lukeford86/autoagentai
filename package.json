@@ -16,6 +16,6 @@
     "@fastify/websocket": "^8.0.1",
     "dotenv": "^16.3.1",
     "twilio": "^4.15.0",
-    "@twilio/voice-response": "^1.0.0"
+    "ws": "^8.13.0"
   }
 }
