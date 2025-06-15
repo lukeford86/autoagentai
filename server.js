@@ -48,6 +48,11 @@ app.get('/', async (req, reply) => {
   return reply.send({ status: 'ok' });
 });
 
+// Simple test endpoint for connectivity
+app.get('/test', (req, reply) => {
+  reply.send({ status: 'test ok' });
+});
+
 // Attach WebSocket server
 const wss = new WebSocketServer({
   server,
