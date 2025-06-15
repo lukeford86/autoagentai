@@ -34,10 +34,7 @@ for (const envVar of requiredEnvVars) {
 // Create Fastify & raw HTTP server
 const app = Fastify({ 
   logger: {
-    level: process.env.LOG_LEVEL || 'info',
-    transport: {
-      target: 'pino-pretty'
-    }
+    level: process.env.LOG_LEVEL || 'info'
   }
 });
 
