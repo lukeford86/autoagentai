@@ -4,12 +4,6 @@ import { WebSocketServer } from 'ws';
 import fastifyCors from '@fastify/cors';
 import fastifyFormBody from '@fastify/formbody';
 import dotenv from 'dotenv';
-import { 
-  handleCallWebhook, 
-  handleMediaStreamSocket, 
-  handleCallStatus,
-  handleAmdStatus 
-} from './twilioHandler.js';
 
 dotenv.config();
 
@@ -62,14 +56,20 @@ app.get('/test', (req, reply) => {
 });
 console.log('Registered GET /test');
 
-// Attach WebSocket server
+// Dummy route handlers for isolation
+const dummyHandler = async (req, reply) => {
+  reply.send({ ok: true });
+};
+
+// Attach WebSocket server (dummy handler)
 const wss = new WebSocketServer({
   server,
   path: '/media-stream',
-  perMessageDeflate: false // Disable compression for better performance
+  perMessageDeflate: false
 });
 wss.on('connection', (ws, request) => {
-  handleMediaStreamSocket(ws, request, app.log);
+  // Dummy: just close the connection
+  ws.close();
 });
 wss.on('error', (error) => {
   app.log.error(error, 'WebSocket server error');
@@ -85,13 +85,13 @@ app.register(fastifyCors, {
 app.register(fastifyFormBody);
 console.log('Registered CORS and formbody plugins');
 
-// Routes
-app.post('/start-call', handleCallWebhook);
-console.log('Registered POST /start-call');
-app.post('/call-status', handleCallStatus);
-console.log('Registered POST /call-status');
-app.post('/amd-status', handleAmdStatus);
-console.log('Registered POST /amd-status');
+// Routes (dummy handlers)
+app.post('/start-call', dummyHandler);
+console.log('Registered POST /start-call (dummy)');
+app.post('/call-status', dummyHandler);
+console.log('Registered POST /call-status (dummy)');
+app.post('/amd-status', dummyHandler);
+console.log('Registered POST /amd-status (dummy)');
 
 // Error handling
 app.setErrorHandler((error, request, reply) => {
@@ -116,6 +116,7 @@ try {
   server.listen(PORT, HOST, () => {
     app.log.info(`HTTP+WS Server listening on port ${PORT} (host: ${HOST})`);
     console.log(`HTTP+WS Server listening on port ${PORT} (host: ${HOST})`);
+    console.log('Server startup complete');
   });
 } catch (err) {
   console.error('Server failed to start:', err);
