@@ -40,9 +40,13 @@ const app = Fastify({
 
 const server = http.createServer(app.handler);
 
-// Health check endpoints
-app.get('/', (req, reply) => reply.send({ status: 'ok' }));
-app.head('/', (req, reply) => reply.send());
+// Health check endpoint - handles both GET and HEAD
+app.get('/', async (req, reply) => {
+  if (req.method === 'HEAD') {
+    return reply.send();
+  }
+  return reply.send({ status: 'ok' });
+});
 
 // Attach WebSocket server
 const wss = new WebSocketServer({
