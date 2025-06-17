@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
-import http from 'http';
-import { WebSocketServer } from 'ws';
+import websocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import fastifyFormBody from '@fastify/formbody';
 import dotenv from 'dotenv';
@@ -39,7 +38,16 @@ const app = Fastify({
     level: process.env.LOG_LEVEL || 'info'
   }
 });
-const server = http.createServer(app.handler);
+
+// Register plugins
+app.register(fastifyCors, {
+  origin: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+});
+app.register(fastifyFormBody);
+app.register(websocket);
+console.log('Registered CORS and formbody plugins');
 
 // Health check endpoint - handles both GET and HEAD
 app.get('/', async (req, reply) => {
@@ -51,39 +59,24 @@ app.get('/', async (req, reply) => {
 console.log('Registered GET /');
 
 // Simple test endpoint for connectivity
-app.get('/test', (req, reply) => {
-  reply.send({ status: 'test ok' });
+app.get('/test', async (req, reply) => {
+  return { status: 'test ok' };
 });
 console.log('Registered GET /test');
+
+// Sample websocket endpoint
+app.get('/ws', { websocket: true }, (socket, req) => {
+  socket.send('hello from server');
+  socket.on('message', message => {
+    socket.send('echo: ' + message);
+  });
+});
+console.log('Registered WS /ws');
 
 // Dummy route handlers for isolation
 const dummyHandler = async (req, reply) => {
   reply.send({ ok: true });
 };
-
-// Attach WebSocket server (dummy handler)
-const wss = new WebSocketServer({
-  server,
-  path: '/media-stream',
-  perMessageDeflate: false
-});
-wss.on('connection', (ws, request) => {
-  // Dummy: just close the connection
-  ws.close();
-});
-wss.on('error', (error) => {
-  app.log.error(error, 'WebSocket server error');
-});
-console.log('WebSocket server attached at /media-stream');
-
-// Register plugins
-app.register(fastifyCors, {
-  origin: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-});
-app.register(fastifyFormBody);
-console.log('Registered CORS and formbody plugins');
 
 // Routes (dummy handlers)
 app.post('/start-call', dummyHandler);
@@ -112,13 +105,12 @@ process.on('unhandledRejection', (reason, promise) => {
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
-try {
-  server.listen(PORT, HOST, () => {
-    app.log.info(`HTTP+WS Server listening on port ${PORT} (host: ${HOST})`);
-    console.log(`HTTP+WS Server listening on port ${PORT} (host: ${HOST})`);
-    console.log('Server startup complete');
-  });
-} catch (err) {
-  console.error('Server failed to start:', err);
-  process.exit(1);
-}
+app.listen({ port: PORT, host: HOST }, (err, address) => {
+  if (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+  app.log.info(`Fastify server listening on ${address}`);
+  console.log(`Fastify server listening on ${address}`);
+  console.log('Server startup complete');
+});
