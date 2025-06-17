@@ -3,6 +3,8 @@ import websocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
 import fastifyFormBody from '@fastify/formbody';
 import dotenv from 'dotenv';
+import Twilio from 'twilio';
+import { WebSocket as NodeWebSocket } from 'ws';
 
 dotenv.config();
 
@@ -49,6 +51,22 @@ app.register(fastifyFormBody);
 app.register(websocket);
 console.log('Registered CORS and formbody plugins');
 
+const twilioClient = Twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+// Helper for ElevenLabs signed URL
+async function getElevenLabsUrl() {
+  const res = await fetch(
+    `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${process.env.ELEVENLABS_AGENT_ID}`,
+    { headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY } }
+  );
+  if (!res.ok) throw new Error('Failed to get ElevenLabs signed URL');
+  const { signed_url } = await res.json();
+  return signed_url;
+}
+
 // Health check endpoint - handles both GET and HEAD
 app.get('/', async (req, reply) => {
   if (req.method === 'HEAD') {
@@ -64,23 +82,88 @@ app.get('/test', async (req, reply) => {
 });
 console.log('Registered GET /test');
 
-// Real /start-call POST handler (placeholder logic)
+// Real /start-call POST handler
 app.post('/start-call', async (req, reply) => {
   const { to, voicePrompt } = req.body;
   if (!to) {
     return reply.status(400).send({ error: 'Missing "to" field' });
   }
-  // Placeholder: log and echo back
-  app.log.info({ to, voicePrompt }, 'Received start-call');
-  return { ok: true, to, voicePrompt };
+  const host = req.headers.host;
+  const twiml = `\n<Response>\n  <Connect>\n    <Stream url=\"wss://${host}/media-stream\" />\n  </Connect>\n</Response>\n`;
+  try {
+    const call = await twilioClient.calls.create({
+      to,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      twiml,
+      statusCallback: `https://${host}/call-status`,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      statusCallbackMethod: 'POST'
+    });
+    req.log.info({ callSid: call.sid }, 'Twilio call initiated');
+    return reply.send({ callSid: call.sid });
+  } catch (err) {
+    req.log.error(err, 'Twilio call initiation failed');
+    return reply.status(500).send({ error: 'Call initiation error' });
+  }
 });
 console.log('Registered POST /start-call (real)');
 
-// WebSocket handler for /media-stream (placeholder logic)
+// WebSocket handler for /media-stream
 app.get('/media-stream', { websocket: true }, (socket, req) => {
-  socket.send('media-stream connection established');
-  socket.on('message', message => {
-    socket.send('echo: ' + message);
+  let elevenSocket;
+  let streamSid;
+  let hasReceivedInitialAudio = false;
+
+  socket.on('message', async (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch (e) {
+      req.log.error(e, 'Invalid JSON from Twilio WS');
+      return;
+    }
+
+    switch (msg.event) {
+      case 'start':
+        streamSid = msg.start.streamSid;
+        try {
+          const wsUrl = await getElevenLabsUrl();
+          elevenSocket = new NodeWebSocket(wsUrl);
+          elevenSocket.on('open', () => {
+            elevenSocket.send(JSON.stringify({
+              system_prompt: 'You are a friendly real estate agent offering free property valuations.',
+              first_message: "Hi, I'm calling from Acme Realty. Would you be interested in a free valuation?",
+              stream: true
+            }));
+          });
+          elevenSocket.on('message', (data) => {
+            const payload = Buffer.from(data).toString('base64');
+            socket.send(JSON.stringify({
+              event: 'media',
+              streamSid,
+              media: { payload }
+            }));
+          });
+        } catch (err) {
+          req.log.error(err, 'Failed to open ElevenLabs WS');
+          socket.close();
+        }
+        break;
+      case 'media':
+        if (msg.media.track === 'inbound' && elevenSocket?.readyState === NodeWebSocket.OPEN) {
+          const pcm = Buffer.from(msg.media.payload, 'base64');
+          elevenSocket.send(pcm);
+        }
+        break;
+      case 'stop':
+        elevenSocket?.close();
+        socket.close();
+        break;
+    }
+  });
+
+  socket.on('close', () => {
+    elevenSocket?.close();
   });
 });
 console.log('Registered WS /media-stream');
