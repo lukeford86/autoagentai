@@ -109,12 +109,12 @@ app.post('/start-call', async (req, reply) => {
 console.log('Registered POST /start-call (real)');
 
 // WebSocket handler for /media-stream
-app.get('/media-stream', { websocket: true }, (socket, req) => {
+app.get('/media-stream', { websocket: true }, (connection, req) => {
   let elevenSocket;
   let streamSid;
   let hasReceivedInitialAudio = false;
 
-  socket.on('message', async (raw) => {
+  connection.socket.on('message', async (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw.toString());
@@ -138,7 +138,7 @@ app.get('/media-stream', { websocket: true }, (socket, req) => {
           });
           elevenSocket.on('message', (data) => {
             const payload = Buffer.from(data).toString('base64');
-            socket.send(JSON.stringify({
+            connection.socket.send(JSON.stringify({
               event: 'media',
               streamSid,
               media: { payload }
@@ -146,7 +146,7 @@ app.get('/media-stream', { websocket: true }, (socket, req) => {
           });
         } catch (err) {
           req.log.error(err, 'Failed to open ElevenLabs WS');
-          socket.close();
+          connection.socket.close();
         }
         break;
       case 'media':
@@ -157,23 +157,39 @@ app.get('/media-stream', { websocket: true }, (socket, req) => {
         break;
       case 'stop':
         elevenSocket?.close();
-        socket.close();
+        connection.socket.close();
         break;
     }
   });
 
-  socket.on('close', () => {
+  connection.socket.on('close', () => {
     elevenSocket?.close();
   });
 });
 console.log('Registered WS /media-stream');
 
+// Call status endpoint with detailed logging
+app.post('/call-status', async (req, reply) => {
+  const callStatus = req.body;
+  req.log.info({
+    callSid: callStatus.CallSid,
+    callStatus: callStatus.CallStatus,
+    callDuration: callStatus.CallDuration,
+    direction: callStatus.Direction,
+    from: callStatus.From,
+    to: callStatus.To,
+    timestamp: callStatus.Timestamp,
+    rawStatus: callStatus
+  }, 'Call status update received');
+  
+  return reply.send({ ok: true });
+});
+console.log('Registered POST /call-status with detailed logging');
+
 // Dummy POST endpoints for now
 const dummyHandler = async (req, reply) => {
   reply.send({ ok: true });
 };
-app.post('/call-status', dummyHandler);
-console.log('Registered POST /call-status (dummy)');
 app.post('/amd-status', dummyHandler);
 console.log('Registered POST /amd-status (dummy)');
 
