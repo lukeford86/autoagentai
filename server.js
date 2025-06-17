@@ -64,23 +64,31 @@ app.get('/test', async (req, reply) => {
 });
 console.log('Registered GET /test');
 
-// Sample websocket endpoint
-app.get('/ws', { websocket: true }, (socket, req) => {
-  socket.send('hello from server');
+// Real /start-call POST handler (placeholder logic)
+app.post('/start-call', async (req, reply) => {
+  const { to, voicePrompt } = req.body;
+  if (!to) {
+    return reply.status(400).send({ error: 'Missing "to" field' });
+  }
+  // Placeholder: log and echo back
+  app.log.info({ to, voicePrompt }, 'Received start-call');
+  return { ok: true, to, voicePrompt };
+});
+console.log('Registered POST /start-call (real)');
+
+// WebSocket handler for /media-stream (placeholder logic)
+app.get('/media-stream', { websocket: true }, (socket, req) => {
+  socket.send('media-stream connection established');
   socket.on('message', message => {
     socket.send('echo: ' + message);
   });
 });
-console.log('Registered WS /ws');
+console.log('Registered WS /media-stream');
 
-// Dummy route handlers for isolation
+// Dummy POST endpoints for now
 const dummyHandler = async (req, reply) => {
   reply.send({ ok: true });
 };
-
-// Routes (dummy handlers)
-app.post('/start-call', dummyHandler);
-console.log('Registered POST /start-call (dummy)');
 app.post('/call-status', dummyHandler);
 console.log('Registered POST /call-status (dummy)');
 app.post('/amd-status', dummyHandler);
