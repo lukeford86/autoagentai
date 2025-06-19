@@ -1,6 +1,7 @@
 // twilioHandler.js
 import Twilio from 'twilio';
 import { WebSocket } from 'ws';
+import { createElevenLabsMcpClient } from './elevenLabsMcp.js';
 
 const {
   TWILIO_ACCOUNT_SID,
@@ -13,6 +14,9 @@ const {
 const client = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const { twiml: { VoiceResponse } } = Twilio;
 
+// Create ElevenLabs client
+const elevenLabsClient = createElevenLabsMcpClient();
+
 // Constants for conversation timing
 const INITIAL_SILENCE_THRESHOLD = 1500; // 1.5 seconds for initial response
 const CONVERSATION_SILENCE_THRESHOLD = 2000; // 2 seconds for ongoing conversation
@@ -21,30 +25,12 @@ const RETRY_DELAY = 1000; // 1 second
 
 /** Fetch a signed URL for your ElevenLabs Conversational AI agent with retry logic */
 async function getElevenUrl(log, retryCount = 0) {
-  const uri = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`;
-  log.info('⏳ fetching ElevenLabs signed URL', { uri, retryCount });
+  log.info('⏳ fetching ElevenLabs signed URL', { retryCount });
   
   try {
-    const res = await fetch(uri, { 
-      headers: { 
-        'xi-api-key': ELEVENLABS_API_KEY,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    if (!res.ok) {
-      const txt = await res.text();
-      if (retryCount < MAX_RETRIES) {
-        log.warn(`ElevenLabs URL fetch failed ${res.status}, retrying...`, { retryCount });
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * Math.pow(2, retryCount)));
-        return getElevenUrl(log, retryCount + 1);
-      }
-      throw new Error(`ElevenLabs URL fetch failed ${res.status}: ${txt}`);
-    }
-    
-    const { signed_url } = await res.json();
+    const signedUrl = await elevenLabsClient.getSignedUrl();
     log.info('✅ got ElevenLabs signed URL');
-    return signed_url;
+    return signedUrl;
   } catch (err) {
     if (retryCount < MAX_RETRIES) {
       log.warn('ElevenLabs URL fetch error, retrying...', { error: err.message, retryCount });
@@ -123,7 +109,12 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
   const handleError = (err, source) => {
     log.error(err, `❌ ${source} error`);
     if (silenceTimer) clearTimeout(silenceTimer);
-    elevenSocket?.close();
+    
+    // Close WebSocket if it exists
+    if (elevenSocket?.readyState === WebSocket.OPEN) {
+      elevenSocket.close();
+    }
+    
     twilioSocket.close();
   };
 
@@ -163,6 +154,7 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
             log.info('👋 Received initial audio from caller');
             
             try {
+              // Get WebSocket URL directly from ElevenLabs API
               const wsUrl = await getElevenUrl(log);
               log.info('🔌 opening ElevenLabs WS', { wsUrl });
               elevenSocket = new WebSocket(wsUrl);
@@ -208,8 +200,8 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
             }
           }
 
-          // Forward buffered audio to ElevenLabs if we have an active connection
-          if (elevenSocket?.readyState === WebSocket.OPEN && audioBuffer.length >= BUFFER_THRESHOLD) {
+          // Forward buffered audio to ElevenLabs
+          if (audioBuffer.length >= BUFFER_THRESHOLD && elevenSocket?.readyState === WebSocket.OPEN) {
             elevenSocket.send(audioBuffer);
             audioBuffer = Buffer.alloc(0);
             
@@ -225,14 +217,16 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
                 threshold,
                 isInitialResponse 
               });
+              
               if (elevenSocket?.readyState === WebSocket.OPEN) {
                 elevenSocket.send(JSON.stringify({
                   type: 'silence_detected',
                   duration: threshold,
                   isInitialResponse
                 }));
-                isInitialResponse = false;
               }
+              
+              isInitialResponse = false;
             }, threshold);
           }
         }
@@ -241,7 +235,12 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
       case 'stop':
         log.info('⏹️ Twilio event "stop" — tearing down');
         if (silenceTimer) clearTimeout(silenceTimer);
-        elevenSocket?.close();
+        
+        // Close WebSocket if it exists
+        if (elevenSocket?.readyState === WebSocket.OPEN) {
+          elevenSocket.close();
+        }
+        
         twilioSocket.close();
         break;
 
@@ -253,29 +252,39 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
   twilioSocket.on('close', (code, reason) => {
     log.info('🔌 Twilio WS closed', { code, reason });
     if (silenceTimer) clearTimeout(silenceTimer);
-    elevenSocket?.close();
+    
+    // Close WebSocket if it exists
+    if (elevenSocket?.readyState === WebSocket.OPEN) {
+      elevenSocket.close();
+    }
   });
 
   twilioSocket.on('error', err => handleError(err, 'Twilio WS'));
 }
 
-// Handle call status updates
 export async function handleCallStatus(req, reply) {
-  const { CallSid, CallStatus } = req.body;
-  req.log.info('📞 Call status update', { CallSid, CallStatus });
-  return reply.send({ status: 'ok' });
+  const callStatus = req.body;
+  req.log.info({
+    callSid: callStatus.CallSid,
+    callStatus: callStatus.CallStatus,
+    callDuration: callStatus.CallDuration,
+    direction: callStatus.Direction,
+    from: callStatus.From,
+    to: callStatus.To,
+    timestamp: callStatus.Timestamp,
+    rawStatus: callStatus
+  }, 'Call status update received');
+  
+  return reply.send({ ok: true });
 }
 
-// Handle answering machine detection status
 export async function handleAmdStatus(req, reply) {
-  const { CallSid, AnsweredBy } = req.body;
-  req.log.info('🤖 AMD status update', { CallSid, AnsweredBy });
+  const amdStatus = req.body;
+  req.log.info({
+    callSid: amdStatus.CallSid,
+    amdResult: amdStatus.AnsweredBy,
+    rawStatus: amdStatus
+  }, 'AMD status update received');
   
-  // If it's an answering machine, we might want to handle it differently
-  if (AnsweredBy === 'machine_start') {
-    // Optionally implement different behavior for answering machines
-    req.log.info('📞 Call answered by machine', { CallSid });
-  }
-  
-  return reply.send({ status: 'ok' });
+  return reply.send({ ok: true });
 }

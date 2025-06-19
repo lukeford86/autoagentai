@@ -4,7 +4,7 @@ import fastifyCors from '@fastify/cors';
 import fastifyFormBody from '@fastify/formbody';
 import dotenv from 'dotenv';
 import Twilio from 'twilio';
-import { WebSocket as NodeWebSocket } from 'ws';
+import { handleCallWebhook, handleMediaStreamSocket, handleCallStatus, handleAmdStatus } from './twilioHandler.js';
 
 dotenv.config();
 
@@ -82,116 +82,23 @@ app.get('/test', async (req, reply) => {
 });
 console.log('Registered GET /test');
 
-// Real /start-call POST handler
-app.post('/start-call', async (req, reply) => {
-  const { to, voicePrompt } = req.body;
-  if (!to) {
-    return reply.status(400).send({ error: 'Missing "to" field' });
-  }
-  const host = req.headers.host;
-  const twiml = `\n<Response>\n  <Connect>\n    <Stream url=\"wss://${host}/media-stream\" />\n  </Connect>\n</Response>\n`;
-  try {
-    const call = await twilioClient.calls.create({
-      to,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      twiml,
-      statusCallback: `https://${host}/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      statusCallbackMethod: 'POST'
-    });
-    req.log.info({ callSid: call.sid }, 'Twilio call initiated');
-    return reply.send({ callSid: call.sid });
-  } catch (err) {
-    req.log.error(err, 'Twilio call initiation failed');
-    return reply.status(500).send({ error: 'Call initiation error' });
-  }
-});
-console.log('Registered POST /start-call (real)');
+// Start call endpoint
+app.post('/start-call', handleCallWebhook);
+console.log('Registered POST /start-call');
 
 // WebSocket handler for /media-stream
 app.get('/media-stream', { websocket: true }, (connection, req) => {
-  let elevenSocket;
-  let streamSid;
-  let hasReceivedInitialAudio = false;
-
-  connection.socket.on('message', async (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (e) {
-      req.log.error(e, 'Invalid JSON from Twilio WS');
-      return;
-    }
-
-    switch (msg.event) {
-      case 'start':
-        streamSid = msg.start.streamSid;
-        try {
-          const wsUrl = await getElevenLabsUrl();
-          elevenSocket = new NodeWebSocket(wsUrl);
-          elevenSocket.on('open', () => {
-            elevenSocket.send(JSON.stringify({
-              system_prompt: 'You are a friendly real estate agent offering free property valuations.',
-              first_message: "Hi, I'm calling from Acme Realty. Would you be interested in a free valuation?",
-              stream: true
-            }));
-          });
-          elevenSocket.on('message', (data) => {
-            const payload = Buffer.from(data).toString('base64');
-            connection.socket.send(JSON.stringify({
-              event: 'media',
-              streamSid,
-              media: { payload }
-            }));
-          });
-        } catch (err) {
-          req.log.error(err, 'Failed to open ElevenLabs WS');
-          connection.socket.close();
-        }
-        break;
-      case 'media':
-        if (msg.media.track === 'inbound' && elevenSocket?.readyState === NodeWebSocket.OPEN) {
-          const pcm = Buffer.from(msg.media.payload, 'base64');
-          elevenSocket.send(pcm);
-        }
-        break;
-      case 'stop':
-        elevenSocket?.close();
-        connection.socket.close();
-        break;
-    }
-  });
-
-  connection.socket.on('close', () => {
-    elevenSocket?.close();
-  });
+  handleMediaStreamSocket(connection.socket, req, req.log);
 });
 console.log('Registered WS /media-stream');
 
-// Call status endpoint with detailed logging
-app.post('/call-status', async (req, reply) => {
-  const callStatus = req.body;
-  req.log.info({
-    callSid: callStatus.CallSid,
-    callStatus: callStatus.CallStatus,
-    callDuration: callStatus.CallDuration,
-    direction: callStatus.Direction,
-    from: callStatus.From,
-    to: callStatus.To,
-    timestamp: callStatus.Timestamp,
-    rawStatus: callStatus
-  }, 'Call status update received');
-  
-  return reply.send({ ok: true });
-});
-console.log('Registered POST /call-status with detailed logging');
+// Call status endpoint
+app.post('/call-status', handleCallStatus);
+console.log('Registered POST /call-status');
 
-// Dummy POST endpoints for now
-const dummyHandler = async (req, reply) => {
-  reply.send({ ok: true });
-};
-app.post('/amd-status', dummyHandler);
-console.log('Registered POST /amd-status (dummy)');
+// AMD status endpoint
+app.post('/amd-status', handleAmdStatus);
+console.log('Registered POST /amd-status');
 
 // Error handling
 app.setErrorHandler((error, request, reply) => {
