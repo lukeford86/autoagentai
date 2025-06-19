@@ -4,7 +4,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:mcp-bridge": "node mcp-bridge-server.js",
+    "start:both": "concurrently \"npm run start\" \"npm run start:mcp-bridge\""
   },
   "engines": {
     "node": ">=22.0.0"
@@ -16,6 +18,7 @@
     "@fastify/websocket": "^11.0.2",
     "dotenv": "^16.3.1",
     "twilio": "^4.15.0",
-    "ws": "^8.13.0"
+    "ws": "^8.13.0",
+    "concurrently": "^8.2.2"
   }
 }

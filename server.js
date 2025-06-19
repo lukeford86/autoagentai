@@ -84,6 +84,24 @@ app.get('/health', async (request, reply) => {
 });
 console.log('Registered GET /health');
 
+// Root endpoint
+app.get('/', async (request, reply) => {
+  return { 
+    service: 'AutoAgentAI Twilio + ElevenLabs Integration',
+    status: 'running',
+    endpoints: {
+      health: '/health',
+      envCheck: '/env-check',
+      testMcpBridge: '/test-mcp-bridge',
+      startCall: '/start-call (POST)',
+      callStatus: '/call-status (POST)',
+      amdStatus: '/amd-status (POST)',
+      mediaStream: '/media-stream (WebSocket)'
+    }
+  };
+});
+console.log('Registered GET /');
+
 // Environment variables check endpoint
 app.get('/env-check', async (request, reply) => {
   const requiredVars = [
@@ -115,6 +133,43 @@ app.get('/env-check', async (request, reply) => {
   return configStatus;
 });
 console.log('Registered GET /env-check');
+
+// MCP Bridge connectivity test endpoint
+app.get('/test-mcp-bridge', async (request, reply) => {
+  const bridgeUrl = process.env.MCP_BRIDGE_URL || 'http://localhost:8001';
+  
+  try {
+    const { createElevenLabsMcpBridgeClient } = await import('./elevenLabsMcpWithBridge.js');
+    const client = createElevenLabsMcpBridgeClient({ bridgeUrl });
+    
+    // Test bridge health
+    const isHealthy = await client.checkBridgeHealth();
+    
+    if (!isHealthy) {
+      return reply.status(503).send({ 
+        status: 'unhealthy', 
+        bridgeUrl,
+        message: 'MCP Bridge is not responding or not ready' 
+      });
+    }
+    
+    // Get available tools
+    const tools = await client.getTools();
+    
+    return reply.send({ 
+      status: 'success', 
+      bridgeUrl,
+      tools: tools.tools || tools
+    });
+  } catch (error) {
+    return reply.status(500).send({ 
+      status: 'error', 
+      bridgeUrl,
+      message: error.message 
+    });
+  }
+});
+console.log('Registered GET /test-mcp-bridge');
 
 // Webhook endpoint for initiating calls
 app.post('/start-call', handleCallWebhook);
@@ -164,10 +219,11 @@ app.listen({ port: PORT, host: HOST }, (err, address) => {
   console.log(`🚀 Server listening at ${address}`);
   console.log('Server startup complete');
   
-  // Log MCP configuration
-  if (process.env.USE_MCP === 'true') {
-    app.log.info(`🤖 Using ElevenLabs MCP server at ${process.env.MCP_URL || 'http://localhost:8000'}`);
+  // Log ElevenLabs configuration
+  const bridgeUrl = process.env.MCP_BRIDGE_URL;
+  if (bridgeUrl) {
+    app.log.info(`🌉 Using ElevenLabs MCP Bridge at ${bridgeUrl}`);
   } else {
-    app.log.info('🔌 Using direct ElevenLabs API connection');
+    app.log.info('🔌 Using direct ElevenLabs API connection (no MCP Bridge configured)');
   }
 });

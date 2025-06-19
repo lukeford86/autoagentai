@@ -32,7 +32,9 @@ export class ElevenLabsMcpClient {
         this.mcpProtocol = url.protocol.replace(':', '');
         this.mcpHost = url.hostname;
         this.mcpPort = url.port ? parseInt(url.port) : (this.mcpProtocol === 'https' ? 443 : 80);
-        this.mcpPath = url.pathname === '/' ? '/mcp' : `${url.pathname}/mcp`;
+        // Try different common MCP endpoint paths
+        const basePath = url.pathname === '/' ? '' : url.pathname;
+        this.mcpPath = `${basePath}/mcp`;
       } catch (error) {
         console.error('Invalid MCP URL:', error);
         this.useMcp = false;
@@ -104,14 +106,17 @@ export class ElevenLabsMcpClient {
    * @param {Object} data - The request data
    * @returns {Promise<Object>} - The response data
    */
-  async requestMcp(data) {
+  async requestMcp(data, retryCount = 0) {
+    const fallbackPaths = [this.mcpPath, '/mcp', '/', '/api/mcp'];
+    const currentPath = fallbackPaths[retryCount] || this.mcpPath;
+    
     return new Promise((resolve, reject) => {
       const requestData = JSON.stringify(data);
       
       const requestOptions = {
         hostname: this.mcpHost,
         port: this.mcpPort,
-        path: this.mcpPath,
+        path: currentPath,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -119,6 +124,12 @@ export class ElevenLabsMcpClient {
         },
         timeout: this.timeout
       };
+
+      console.log('🔍 MCP Request:', {
+        url: `${this.mcpProtocol}://${this.mcpHost}:${this.mcpPort}${currentPath}`,
+        data: data,
+        attempt: retryCount + 1
+      });
 
       // Use http or https based on protocol
       const requester = this.mcpProtocol === 'https' ? https : http;
@@ -131,22 +142,49 @@ export class ElevenLabsMcpClient {
         });
         
         res.on('end', () => {
-          try {
-            const parsedData = JSON.parse(responseData);
-            resolve(parsedData);
-          } catch (error) {
-            reject(new Error(`Failed to parse response: ${error.message}`));
+          console.log('📥 MCP Response:', {
+            statusCode: res.statusCode,
+            headers: res.headers,
+            data: responseData,
+            attempt: retryCount + 1
+          });
+          
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              const parsedData = responseData ? JSON.parse(responseData) : {};
+              resolve(parsedData);
+            } catch (error) {
+              reject(new Error(`Failed to parse response: ${error.message}`));
+            }
+          } else if (res.statusCode === 404 && retryCount < fallbackPaths.length - 1) {
+            // Try next fallback path
+            console.log(`🔄 Trying fallback path ${retryCount + 2}/${fallbackPaths.length}`);
+            this.requestMcp(data, retryCount + 1).then(resolve).catch(reject);
+          } else {
+            reject(new Error(`MCP request failed with status ${res.statusCode}: ${responseData}`));
           }
         });
       });
 
       req.on('error', (error) => {
-        reject(new Error(`Request failed: ${error.message}`));
+        console.error('❌ MCP Request Error:', error);
+        if (retryCount < fallbackPaths.length - 1) {
+          console.log(`🔄 Trying fallback path ${retryCount + 2}/${fallbackPaths.length} after error`);
+          this.requestMcp(data, retryCount + 1).then(resolve).catch(reject);
+        } else {
+          reject(new Error(`Request failed: ${error.message}`));
+        }
       });
 
       req.on('timeout', () => {
+        console.error('⏰ MCP Request Timeout');
         req.destroy();
-        reject(new Error('Request timed out'));
+        if (retryCount < fallbackPaths.length - 1) {
+          console.log(`🔄 Trying fallback path ${retryCount + 2}/${fallbackPaths.length} after timeout`);
+          this.requestMcp(data, retryCount + 1).then(resolve).catch(reject);
+        } else {
+          reject(new Error('Request timed out'));
+        }
       });
 
       req.write(requestData);
