@@ -38,16 +38,18 @@ for (const envVar of requiredEnvVars) {
 }
 
 const app = Fastify({ 
-  logger: {
-    level: process.env.LOG_LEVEL || 'info',
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        translateTime: 'HH:MM:ss Z',
-        ignore: 'pid,hostname',
-      },
-    },
-  }
+  logger: process.env.NODE_ENV === 'production' 
+    ? { level: process.env.LOG_LEVEL || 'info' } // Simple logger for production
+    : { // Pretty logger for development
+        level: process.env.LOG_LEVEL || 'info',
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            translateTime: 'HH:MM:ss Z',
+            ignore: 'pid,hostname',
+          },
+        },
+      }
 });
 
 // Register plugins
