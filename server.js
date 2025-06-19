@@ -131,7 +131,7 @@ console.log('Registered POST /amd-status');
 // WebSocket endpoint for media streaming
 app.register(async function (fastify) {
   fastify.get('/media-stream', { websocket: true }, (connection, req) => {
-    handleMediaStreamSocket(connection.socket, req, req.log);
+    handleMediaStreamSocket(connection, req, req.log);
   });
 });
 console.log('Registered WS /media-stream');
