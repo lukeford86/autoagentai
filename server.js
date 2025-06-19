@@ -5,8 +5,10 @@ import fastifyFormBody from '@fastify/formbody';
 import dotenv from 'dotenv';
 import Twilio from 'twilio';
 import { handleCallWebhook, handleMediaStreamSocket, handleCallStatus, handleAmdStatus } from './twilioHandler.js';
+import { config } from 'dotenv';
 
-dotenv.config();
+// Load environment variables from .env file
+config();
 
 // Log non-secret environment variables for diagnostics
 console.log('ENV:', {
@@ -37,7 +39,14 @@ for (const envVar of requiredEnvVars) {
 
 const app = Fastify({ 
   logger: {
-    level: process.env.LOG_LEVEL || 'info'
+    level: process.env.LOG_LEVEL || 'info',
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        translateTime: 'HH:MM:ss Z',
+        ignore: 'pid,hostname',
+      },
+    },
   }
 });
 
@@ -67,38 +76,63 @@ async function getElevenLabsUrl() {
   return signed_url;
 }
 
-// Health check endpoint - handles both GET and HEAD
-app.get('/', async (req, reply) => {
-  if (req.method === 'HEAD') {
-    return reply.send();
+// Health check endpoint
+app.get('/health', async (request, reply) => {
+  return { status: 'ok' };
+});
+console.log('Registered GET /health');
+
+// Environment variables check endpoint
+app.get('/env-check', async (request, reply) => {
+  const requiredVars = [
+    'TWILIO_ACCOUNT_SID',
+    'TWILIO_AUTH_TOKEN',
+    'TWILIO_PHONE_NUMBER',
+    'ELEVENLABS_API_KEY',
+    'ELEVENLABS_AGENT_ID'
+  ];
+  
+  const optionalVars = [
+    'USE_MCP',
+    'MCP_URL'
+  ];
+  
+  const missingVars = requiredVars.filter(name => !process.env[name]);
+  
+  const configStatus = {
+    missing: missingVars,
+    complete: missingVars.length === 0,
+    mode: process.env.USE_MCP === 'true' ? 'mcp' : 'direct',
+    mcpUrl: process.env.MCP_URL || 'not configured'
+  };
+  
+  if (!configStatus.complete) {
+    return reply.status(500).send(configStatus);
   }
-  return reply.send({ status: 'ok' });
+  
+  return configStatus;
 });
-console.log('Registered GET /');
+console.log('Registered GET /env-check');
 
-// Simple test endpoint for connectivity
-app.get('/test', async (req, reply) => {
-  return { status: 'test ok' };
-});
-console.log('Registered GET /test');
-
-// Start call endpoint
+// Webhook endpoint for initiating calls
 app.post('/start-call', handleCallWebhook);
 console.log('Registered POST /start-call');
 
-// WebSocket handler for /media-stream
-app.get('/media-stream', { websocket: true }, (connection, req) => {
-  handleMediaStreamSocket(connection.socket, req, req.log);
-});
-console.log('Registered WS /media-stream');
-
-// Call status endpoint
+// Webhook endpoint for call status updates
 app.post('/call-status', handleCallStatus);
 console.log('Registered POST /call-status');
 
-// AMD status endpoint
+// Webhook endpoint for AMD status updates
 app.post('/amd-status', handleAmdStatus);
 console.log('Registered POST /amd-status');
+
+// WebSocket endpoint for media streaming
+app.register(async function (fastify) {
+  fastify.get('/media-stream', { websocket: true }, (connection, req) => {
+    handleMediaStreamSocket(connection.socket, req, req.log);
+  });
+});
+console.log('Registered WS /media-stream');
 
 // Error handling
 app.setErrorHandler((error, request, reply) => {
@@ -124,7 +158,14 @@ app.listen({ port: PORT, host: HOST }, (err, address) => {
     app.log.error(err);
     process.exit(1);
   }
-  app.log.info(`Fastify server listening on ${address}`);
-  console.log(`Fastify server listening on ${address}`);
+  app.log.info(`🚀 Server listening at ${address}`);
+  console.log(`🚀 Server listening at ${address}`);
   console.log('Server startup complete');
+  
+  // Log MCP configuration
+  if (process.env.USE_MCP === 'true') {
+    app.log.info(`🤖 Using ElevenLabs MCP server at ${process.env.MCP_URL || 'http://localhost:8000'}`);
+  } else {
+    app.log.info('🔌 Using direct ElevenLabs API connection');
+  }
 });

@@ -6,15 +6,14 @@ This repository contains code for integrating Twilio for outbound calling with E
 
 This repository is organized into multiple branches for deployment to separate services:
 
-- `main` - Contains shared code and documentation
-- `node` - Contains the Node.js application for deployment to a web service
+- `main` - Contains the Node.js application with support for both direct API and MCP integration
 - `python-mcp` - Contains the Python MCP server for deployment to a separate service
 
 ## Deployment Architecture
 
 The application is designed to be deployed as two separate services on Render.com:
 
-1. **Node.js Application** (from the `node` branch)
+1. **Node.js Application** (from the `main` branch)
    - Handles Twilio integration
    - Makes outbound calls
    - Streams audio to/from ElevenLabs
@@ -30,11 +29,11 @@ The application is designed to be deployed as two separate services on Render.co
 ### For Node.js Application Development
 
 ```bash
-git checkout node
-bun install
+git checkout main
+npm install
 cp .env.example .env
 # Edit .env with your credentials
-bun start
+npm start
 ```
 
 ### For Python MCP Server Development
@@ -53,7 +52,7 @@ python mcp_server.py
 
 1. Create a new Web Service on Render.com
 2. Connect to your GitHub repository
-3. Select the `node` branch
+3. Select the `main` branch
 4. Configure the environment variables as specified in `.env.example`
 5. Deploy the service
 
@@ -71,6 +70,22 @@ Once both services are deployed, update the Node.js application's environment va
 
 - Set `USE_MCP=true`
 - Set `MCP_URL` to the URL of your deployed Python MCP server
+
+## API Endpoints
+
+### Node.js Application
+
+- `GET /health` - Health check endpoint
+- `GET /env-check` - Check environment variables
+- `POST /start-call` - Start an outbound call
+- `POST /call-status` - Receive call status updates
+- `POST /amd-status` - Receive answering machine detection status updates
+- `GET /media-stream` - WebSocket endpoint for Twilio media streaming
+
+### Python MCP Server
+
+- `GET /health` - Health check endpoint
+- `POST /mcp` - MCP API endpoint for handling ElevenLabs MCP requests
 
 ## License
 

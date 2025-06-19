@@ -14,8 +14,11 @@ const {
 const client = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const { twiml: { VoiceResponse } } = Twilio;
 
-// Create ElevenLabs client
-const elevenLabsClient = createElevenLabsMcpClient();
+// Create ElevenLabs client with MCP support
+const elevenLabsClient = createElevenLabsMcpClient({
+  useMcp: process.env.USE_MCP === 'true',
+  mcpUrl: process.env.MCP_URL
+});
 
 // Constants for conversation timing
 const INITIAL_SILENCE_THRESHOLD = 1500; // 1.5 seconds for initial response
@@ -97,7 +100,7 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
     protocol: request.headers['sec-websocket-protocol']
   });
 
-  let elevenSocket, streamSid;
+  let elevenSocket, streamSid, agentId;
   let isCallAnswered = false;
   let hasReceivedInitialAudio = false;
   let silenceTimer = null;
@@ -109,6 +112,12 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
   const handleError = (err, source) => {
     log.error(err, `❌ ${source} error`);
     if (silenceTimer) clearTimeout(silenceTimer);
+    
+    // Close MCP agent if it exists
+    if (agentId) {
+      elevenLabsClient.closeAgent(agentId)
+        .catch(closeErr => log.error(closeErr, '❌ Failed to close MCP agent'));
+    }
     
     // Close WebSocket if it exists
     if (elevenSocket?.readyState === WebSocket.OPEN) {
@@ -154,55 +163,119 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
             log.info('👋 Received initial audio from caller');
             
             try {
-              // Get WebSocket URL directly from ElevenLabs API
-              const wsUrl = await getElevenUrl(log);
-              log.info('🔌 opening ElevenLabs WS', { wsUrl });
-              elevenSocket = new WebSocket(wsUrl);
-
-              elevenSocket.on('open', () => {
-                log.info('🗨️ ElevenLabs WS open – sending init prompt');
-                elevenSocket.send(JSON.stringify({
-                  system_prompt: 'You are a friendly real estate agent offering free property valuations. Be conversational and natural. Keep responses concise and engaging.',
-                  first_message: "Hi, I'm calling from Acme Realty. I noticed your property might be a good fit for our current buyers. Would you be interested in a free valuation?",
-                  stream: true,
-                  voice_settings: {
-                    stability: 0.5,
-                    similarity_boost: 0.75,
-                    style: 0.0,
-                    use_speaker_boost: true
-                  }
-                }));
-              });
-
-              elevenSocket.on('message', data => {
-                if (data instanceof Buffer) {
-                  log.info('🗨️ ElevenLabs → audio chunk', { bytes: data.length });
-                  const payload = data.toString('base64');
-                  const out = JSON.stringify({
-                    event: 'media',
-                    streamSid,
-                    media: { payload }
+              // Try using MCP server first
+              if (process.env.USE_MCP === 'true') {
+                try {
+                  log.info('🤖 Creating ElevenLabs MCP voice agent');
+                  const agentResponse = await elevenLabsClient.createVoiceAgent({
+                    systemPrompt: 'You are a friendly real estate agent offering free property valuations. Be conversational and natural. Keep responses concise and engaging.',
+                    firstMessage: "Hi, I'm calling from Acme Realty. I noticed your property might be a good fit for our current buyers. Would you be interested in a free valuation?",
+                    voiceSettings: {
+                      stability: 0.5,
+                      similarity_boost: 0.75,
+                      style: 0.0,
+                      use_speaker_boost: true
+                    }
                   });
-                  log.info('📤 sending media → Twilio', { bytes: out.length });
-                  twilioSocket.send(out);
+                  
+                  agentId = agentResponse.agent_id;
+                  log.info('✅ Created ElevenLabs MCP voice agent', { agentId });
+                  
+                  // If we have a signed_url from the MCP server, use it to create a WebSocket
+                  if (agentResponse.signed_url) {
+                    const wsUrl = agentResponse.signed_url;
+                    log.info('🔌 Opening ElevenLabs WS from MCP response', { wsUrl });
+                    elevenSocket = new WebSocket(wsUrl);
+                    
+                    setupWebSocket(elevenSocket, twilioSocket, streamSid, log);
+                  }
+                } catch (mcpErr) {
+                  log.warn('⚠️ Failed to use MCP server, falling back to direct WebSocket', { error: mcpErr.message });
+                  fallbackToDirectWebSocket();
                 }
-              });
+              } else {
+                // Use direct WebSocket connection
+                fallbackToDirectWebSocket();
+              }
+              
+              // Function to fall back to direct WebSocket connection
+              async function fallbackToDirectWebSocket() {
+                const wsUrl = await getElevenUrl(log);
+                log.info('🔌 Opening ElevenLabs WS directly', { wsUrl });
+                elevenSocket = new WebSocket(wsUrl);
+                
+                setupWebSocket(elevenSocket, twilioSocket, streamSid, log);
+              }
+              
+              // Function to set up the WebSocket connection
+              function setupWebSocket(socket, twilioSocket, streamSid, log) {
+                socket.on('open', () => {
+                  log.info('🗨️ ElevenLabs WS open – sending init prompt');
+                  socket.send(JSON.stringify({
+                    system_prompt: 'You are a friendly real estate agent offering free property valuations. Be conversational and natural. Keep responses concise and engaging.',
+                    first_message: "Hi, I'm calling from Acme Realty. I noticed your property might be a good fit for our current buyers. Would you be interested in a free valuation?",
+                    stream: true,
+                    voice_settings: {
+                      stability: 0.5,
+                      similarity_boost: 0.75,
+                      style: 0.0,
+                      use_speaker_boost: true
+                    }
+                  }));
+                });
 
-              elevenSocket.on('error', err => handleError(err, 'ElevenLabs WS'));
-              elevenSocket.on('close', (code, reason) => {
-                log.info('✂️ ElevenLabs WS closed', { code, reason });
-                const stopMsg = JSON.stringify({ event: 'stop', streamSid });
-                twilioSocket.send(stopMsg);
-                twilioSocket.close();
-              });
+                socket.on('message', data => {
+                  if (data instanceof Buffer) {
+                    log.info('🗨️ ElevenLabs → audio chunk', { bytes: data.length });
+                    const payload = data.toString('base64');
+                    const out = JSON.stringify({
+                      event: 'media',
+                      streamSid,
+                      media: { payload }
+                    });
+                    log.info('📤 sending media → Twilio', { bytes: out.length });
+                    twilioSocket.send(out);
+                  }
+                });
+
+                socket.on('error', err => handleError(err, 'ElevenLabs WS'));
+                socket.on('close', (code, reason) => {
+                  log.info('✂️ ElevenLabs WS closed', { code, reason });
+                  const stopMsg = JSON.stringify({ event: 'stop', streamSid });
+                  twilioSocket.send(stopMsg);
+                  twilioSocket.close();
+                });
+              }
             } catch (err) {
               handleError(err, 'ElevenLabs connection');
             }
           }
 
           // Forward buffered audio to ElevenLabs
-          if (audioBuffer.length >= BUFFER_THRESHOLD && elevenSocket?.readyState === WebSocket.OPEN) {
-            elevenSocket.send(audioBuffer);
+          if (audioBuffer.length >= BUFFER_THRESHOLD) {
+            if (agentId && process.env.USE_MCP === 'true') {
+              // Use MCP server
+              try {
+                const response = await elevenLabsClient.sendAudioToAgent(audioBuffer, agentId);
+                
+                if (response.audio_data) {
+                  log.info('🗨️ ElevenLabs MCP → audio chunk', { bytes: response.audio_data.length });
+                  const out = JSON.stringify({
+                    event: 'media',
+                    streamSid,
+                    media: { payload: response.audio_data }
+                  });
+                  log.info('📤 sending media → Twilio', { bytes: out.length });
+                  twilioSocket.send(out);
+                }
+              } catch (err) {
+                log.error(err, '❌ Failed to send audio to MCP agent');
+              }
+            } else if (elevenSocket?.readyState === WebSocket.OPEN) {
+              // Use direct WebSocket
+              elevenSocket.send(audioBuffer);
+            }
+            
             audioBuffer = Buffer.alloc(0);
             
             // Reset silence timer when we receive audio
@@ -218,7 +291,12 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
                 isInitialResponse 
               });
               
-              if (elevenSocket?.readyState === WebSocket.OPEN) {
+              if (agentId && process.env.USE_MCP === 'true') {
+                // Use MCP server
+                elevenLabsClient.notifySilence(agentId, threshold, isInitialResponse)
+                  .catch(err => log.error(err, '❌ Failed to notify silence to MCP agent'));
+              } else if (elevenSocket?.readyState === WebSocket.OPEN) {
+                // Use direct WebSocket
                 elevenSocket.send(JSON.stringify({
                   type: 'silence_detected',
                   duration: threshold,
@@ -236,6 +314,12 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
         log.info('⏹️ Twilio event "stop" — tearing down');
         if (silenceTimer) clearTimeout(silenceTimer);
         
+        // Close MCP agent if it exists
+        if (agentId && process.env.USE_MCP === 'true') {
+          elevenLabsClient.closeAgent(agentId)
+            .catch(err => log.error(err, '❌ Failed to close MCP agent'));
+        }
+        
         // Close WebSocket if it exists
         if (elevenSocket?.readyState === WebSocket.OPEN) {
           elevenSocket.close();
@@ -252,6 +336,12 @@ export async function handleMediaStreamSocket(twilioSocket, request, log) {
   twilioSocket.on('close', (code, reason) => {
     log.info('🔌 Twilio WS closed', { code, reason });
     if (silenceTimer) clearTimeout(silenceTimer);
+    
+    // Close MCP agent if it exists
+    if (agentId && process.env.USE_MCP === 'true') {
+      elevenLabsClient.closeAgent(agentId)
+        .catch(err => log.error(err, '❌ Failed to close MCP agent'));
+    }
     
     // Close WebSocket if it exists
     if (elevenSocket?.readyState === WebSocket.OPEN) {
