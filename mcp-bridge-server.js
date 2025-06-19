@@ -15,52 +15,148 @@ class MCPBridge {
   }
 
   async start() {
+    // Check Python availability first
+    console.log('🐍 Checking Python environment...');
+    console.log('Python path:', process.env.PATH);
+    console.log('Node version:', process.version);
+    
+    // Try different Python commands
+    const pythonCommands = ['python3', 'python', '/usr/bin/python3', '/usr/local/bin/python3'];
+    let pythonCmd = null;
+    
+    for (const cmd of pythonCommands) {
+      try {
+        const testProcess = spawn(cmd, ['--version'], { stdio: 'pipe' });
+        await new Promise((resolve, reject) => {
+          testProcess.on('close', (code) => {
+            if (code === 0) {
+              pythonCmd = cmd;
+              console.log(`✅ Found Python: ${cmd}`);
+              resolve();
+            } else {
+              reject();
+            }
+          });
+          testProcess.on('error', reject);
+        });
+        break;
+      } catch (error) {
+        console.log(`❌ Python command failed: ${cmd}`);
+        continue;
+      }
+    }
+    
+    if (!pythonCmd) {
+      throw new Error('No Python interpreter found');
+    }
+    
+    // Test if elevenlabs-mcp package is available
+    console.log('📦 Testing elevenlabs-mcp package...');
+    try {
+      const testImport = spawn(pythonCmd, ['-c', 'import elevenlabs_mcp; print("✅ elevenlabs-mcp available")'], { stdio: 'pipe' });
+      await new Promise((resolve, reject) => {
+        let output = '';
+        testImport.stdout.on('data', (data) => {
+          output += data.toString();
+        });
+        testImport.on('close', (code) => {
+          if (code === 0) {
+            console.log('Package test output:', output.trim());
+            resolve();
+          } else {
+            reject(new Error(`elevenlabs-mcp import failed with code ${code}`));
+          }
+        });
+        testImport.on('error', reject);
+      });
+    } catch (error) {
+      console.error('❌ elevenlabs-mcp package not available:', error.message);
+      throw new Error('elevenlabs-mcp package not installed or not accessible');
+    }
+
     // Spawn the ElevenLabs MCP server
-    this.mcpProcess = spawn('python', ['-m', 'elevenlabs_mcp'], {
+    console.log(`🚀 Starting MCP server with: ${pythonCmd} -m elevenlabs_mcp`);
+    this.mcpProcess = spawn(pythonCmd, ['-m', 'elevenlabs_mcp'], {
       env: {
         ...process.env,
-        ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY
+        ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+        PYTHONPATH: process.env.PYTHONPATH || '',
+        PATH: process.env.PATH
       },
-      stdio: ['pipe', 'pipe', 'inherit']
+      stdio: ['pipe', 'pipe', 'pipe'] // Capture stderr too
     });
 
     // Handle MCP server responses
     this.mcpProcess.stdout.on('data', (data) => {
       const lines = data.toString().split('\n').filter(line => line.trim());
+      console.log('📥 MCP stdout:', lines);
       
       for (const line of lines) {
         try {
           const response = JSON.parse(line);
           this.handleMCPResponse(response);
         } catch (error) {
-          console.error('Failed to parse MCP response:', error);
+          console.log('📝 MCP output (non-JSON):', line);
         }
       }
+    });
+    
+    // Handle stderr
+    this.mcpProcess.stderr.on('data', (data) => {
+      console.error('📥 MCP stderr:', data.toString());
     });
 
     this.mcpProcess.on('error', (error) => {
-      console.error('MCP process error:', error);
+      console.error('❌ MCP process error:', error);
+      throw error;
     });
+    
+    this.mcpProcess.on('close', (code, signal) => {
+      console.log(`📤 MCP process closed with code ${code}, signal ${signal}`);
+      this.isReady = false;
+    });
+
+    // Wait a bit for MCP server to fully start
+    console.log('⏳ Waiting for MCP server to initialize...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Initialize MCP connection
-    await this.sendMCPRequest({
-      jsonrpc: '2.0',
-      id: this.getNextId(),
-      method: 'initialize',
-      params: {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          tools: {}
-        },
-        clientInfo: {
-          name: 'twilio-bridge',
-          version: '1.0.0'
+    console.log('🤝 Initializing MCP connection...');
+    try {
+      const initResponse = await this.sendMCPRequest({
+        jsonrpc: '2.0',
+        id: this.getNextId(),
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {
+            tools: {}
+          },
+          clientInfo: {
+            name: 'twilio-bridge',
+            version: '1.0.0'
+          }
         }
-      }
-    });
+      });
+      
+      console.log('✅ MCP initialization response:', initResponse);
+      
+      // Send initialized notification
+      await this.sendMCPRequest({
+        jsonrpc: '2.0',
+        method: 'notifications/initialized',
+        params: {}
+      });
+      
+      console.log('✅ MCP initialized notification sent');
+      
+    } catch (error) {
+      console.error('❌ MCP initialization failed:', error);
+      throw error;
+    }
 
     this.isReady = true;
-    console.log('MCP Bridge ready');
+    console.log('✅ MCP Bridge ready and initialized');
   }
 
   getNextId() {
@@ -223,6 +319,13 @@ app.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
     console.log('✅ MCP Bridge started successfully');
   } catch (error) {
     console.error('❌ Failed to start MCP Bridge:', error);
-    process.exit(1);
+    console.error('💡 Tips for fixing:');
+    console.error('  1. Ensure Python 3.8+ is available');
+    console.error('  2. Install: pip3 install elevenlabs-mcp');
+    console.error('  3. Set ELEVENLABS_API_KEY environment variable');
+    console.error('  4. Check build logs for Python installation errors');
+    
+    // Don't exit - let the HTTP server stay up for debugging
+    console.log('🔧 MCP Bridge will be unavailable, but HTTP endpoints remain active for debugging');
   }
 }); 

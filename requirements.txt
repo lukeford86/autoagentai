@@ -1,0 +1,1 @@
+elevenlabs-mcp>=0.4.0 

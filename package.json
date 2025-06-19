@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "start:mcp-bridge": "node mcp-bridge-server.js",
-    "start:both": "concurrently \"npm run start\" \"npm run start:mcp-bridge\""
+    "start:both": "concurrently \"npm run start\" \"npm run start:mcp-bridge\"",
+    "start:safe": "node server.js"
   },
   "engines": {
     "node": ">=22.0.0"
