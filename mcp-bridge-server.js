@@ -53,25 +53,77 @@ class MCPBridge {
     // Test if elevenlabs-mcp package is available
     console.log('📦 Testing elevenlabs-mcp package...');
     try {
-      const testImport = spawn(pythonCmd, ['-c', 'import elevenlabs_mcp; print("✅ elevenlabs-mcp available")'], { stdio: 'pipe' });
+      const testImport = spawn(pythonCmd, ['-c', 'import elevenlabs_mcp; print("✅ elevenlabs-mcp available"); import sys; print(f"Python version: {sys.version}")'], { stdio: 'pipe' });
       await new Promise((resolve, reject) => {
         let output = '';
+        let errorOutput = '';
+        
         testImport.stdout.on('data', (data) => {
           output += data.toString();
         });
+        
+        testImport.stderr.on('data', (data) => {
+          errorOutput += data.toString();
+        });
+        
         testImport.on('close', (code) => {
+          console.log('📦 Package test output:', output.trim());
+          if (errorOutput) {
+            console.log('📦 Package test errors:', errorOutput.trim());
+          }
+          
           if (code === 0) {
-            console.log('Package test output:', output.trim());
             resolve();
           } else {
-            reject(new Error(`elevenlabs-mcp import failed with code ${code}`));
+            reject(new Error(`elevenlabs-mcp import failed with code ${code}. Error: ${errorOutput}`));
           }
         });
+        
         testImport.on('error', reject);
+        
+        // Add timeout for the test
+        setTimeout(() => {
+          testImport.kill();
+          reject(new Error('Package test timeout'));
+        }, 10000);
       });
     } catch (error) {
       console.error('❌ elevenlabs-mcp package not available:', error.message);
       throw new Error('elevenlabs-mcp package not installed or not accessible');
+    }
+
+    // Test if MCP server can start at all
+    console.log('🧪 Testing MCP server startup...');
+    try {
+      const testMcp = spawn(pythonCmd, ['-m', 'elevenlabs_mcp', '--help'], { 
+        stdio: 'pipe',
+        timeout: 5000 
+      });
+      
+      await new Promise((resolve, reject) => {
+        let output = '';
+        let errorOutput = '';
+        
+        testMcp.stdout.on('data', (data) => output += data.toString());
+        testMcp.stderr.on('data', (data) => errorOutput += data.toString());
+        
+        testMcp.on('close', (code) => {
+          console.log('🧪 MCP server test output:', { output: output.slice(0, 200), error: errorOutput.slice(0, 200) });
+          resolve(); // Don't fail if help command returns non-zero
+        });
+        
+        testMcp.on('error', (error) => {
+          console.log('🧪 MCP server test error:', error.message);
+          resolve(); // Continue anyway
+        });
+        
+        setTimeout(() => {
+          testMcp.kill();
+          resolve();
+        }, 5000);
+      });
+    } catch (error) {
+      console.log('🧪 MCP server test failed, continuing anyway:', error.message);
     }
 
     // Spawn the ElevenLabs MCP server
@@ -116,43 +168,87 @@ class MCPBridge {
       this.isReady = false;
     });
 
-    // Wait a bit for MCP server to fully start
+    // Wait for MCP server to fully start and show some output
     console.log('⏳ Waiting for MCP server to initialize...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Initialize MCP connection
-    console.log('🤝 Initializing MCP connection...');
-    try {
-      const initResponse = await this.sendMCPRequest({
-        jsonrpc: '2.0',
-        id: this.getNextId(),
-        method: 'initialize',
-        params: {
-          protocolVersion: '2024-11-05',
-          capabilities: {
-            tools: {}
-          },
-          clientInfo: {
-            name: 'twilio-bridge',
-            version: '1.0.0'
-          }
+    
+    // Wait for the process to output something or timeout
+    let processReady = false;
+    const readyTimeout = setTimeout(() => {
+      if (!processReady) {
+        console.log('⚠️ MCP process timeout - proceeding with initialization attempt');
+      }
+    }, 5000);
+    
+    // Listen for any output that indicates the server is ready
+    const readyPromise = new Promise((resolve) => {
+      const checkReady = () => {
+        if (!processReady) {
+          processReady = true;
+          clearTimeout(readyTimeout);
+          console.log('📡 MCP process appears to be outputting data');
+          resolve();
         }
-      });
+      };
       
-      console.log('✅ MCP initialization response:', initResponse);
-      
-      // Send initialized notification
-      await this.sendMCPRequest({
-        jsonrpc: '2.0',
-        method: 'notifications/initialized',
-        params: {}
-      });
-      
-      console.log('✅ MCP initialized notification sent');
-      
-    } catch (error) {
-      console.error('❌ MCP initialization failed:', error);
-      throw error;
+      // Consider the server ready after any stdout output or after 3 seconds
+      this.mcpProcess.stdout.once('data', checkReady);
+      setTimeout(checkReady, 3000); // Fallback timeout
+    });
+    
+    await readyPromise;
+
+    // Initialize MCP connection with retries
+    console.log('🤝 Initializing MCP connection...');
+    let initSuccess = false;
+    let lastError = null;
+    
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`🔄 MCP initialization attempt ${attempt}/3`);
+        
+        const initResponse = await this.sendMCPRequest({
+          jsonrpc: '2.0',
+          id: this.getNextId(),
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {
+              tools: {}
+            },
+            clientInfo: {
+              name: 'twilio-bridge',
+              version: '1.0.0'
+            }
+          }
+        });
+        
+        console.log('✅ MCP initialization response:', initResponse);
+        
+        // Send initialized notification
+        await this.sendMCPRequest({
+          jsonrpc: '2.0',
+          method: 'notifications/initialized',
+          params: {}
+        });
+        
+        console.log('✅ MCP initialized notification sent');
+        initSuccess = true;
+        break;
+        
+      } catch (error) {
+        lastError = error;
+        console.error(`❌ MCP initialization attempt ${attempt} failed:`, error.message);
+        
+        if (attempt < 3) {
+          console.log(`⏳ Waiting 2 seconds before retry...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+    
+    if (!initSuccess) {
+      console.error('❌ All MCP initialization attempts failed');
+      throw lastError || new Error('MCP initialization failed after 3 attempts');
     }
 
     this.isReady = true;
@@ -182,9 +278,9 @@ class MCPBridge {
       setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
-          reject(new Error('MCP request timeout'));
+          reject(new Error(`MCP request timeout after 15s. Request: ${JSON.stringify(request)}`));
         }
-      }, 30000); // 30 second timeout
+      }, 15000); // 15 second timeout
     });
   }
 
